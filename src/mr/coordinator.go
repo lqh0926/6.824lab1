@@ -1,11 +1,14 @@
 package mr
 
 import (
+	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"net/rpc"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -53,11 +56,11 @@ func (c *Coordinator) AssignTask(args *RequestTask, reply *AssignTask) error {
 				reply.Filename = []string{c.InputFiles[i]}
 				reply.WorkId = i
 				reply.Worktype = "Map"
+				reply.NReduce = c.nReduce
 				return nil
 			}
 		}
-	}
-	if !c.allReduceTasksCompleted() {
+	} else if !c.allReduceTasksCompleted() {
 		for i, task := range c.ReduceTasks {
 			if !task.InProgress && !task.Completed {
 				c.ReduceTasks[i].InProgress = true
@@ -65,6 +68,7 @@ func (c *Coordinator) AssignTask(args *RequestTask, reply *AssignTask) error {
 				reply.Filename = c.IntermediateFiles[i]
 				reply.WorkId = i
 				reply.Worktype = "Reduce"
+				reply.NReduce = c.nReduce
 				return nil
 			}
 		}
@@ -72,7 +76,9 @@ func (c *Coordinator) AssignTask(args *RequestTask, reply *AssignTask) error {
 	if c.allMapTasksCompleted() && c.allReduceTasksCompleted() {
 		c.AllTasksCompleted = true
 		reply.Worktype = "Done"
+		return nil
 	}
+	reply.Worktype = "Wait"
 	return nil
 
 }
@@ -82,10 +88,12 @@ func (c *Coordinator) MarkTaskCompleted(args *TaskCompleteArgs, reply *TaskCompl
 	defer c.Mutex.Unlock()
 	if args.Worktype == "Map" {
 		c.MapTasks[args.WorkId].Completed = true
-		for i, file := range args.IntermediateFiles {
-			c.IntermediateFiles[i] = append(c.IntermediateFiles[i], file...)
+		for _, file := range args.IntermediateFiles {
+			id, _ := strconv.Atoi(strings.Split(file, "-")[2])
+			c.IntermediateFiles[id] = append(c.IntermediateFiles[id], file)
 		}
 		c.CompletedMapTasks++
+		fmt.Printf("Map Task %v Completed", args.WorkId)
 	} else if args.Worktype == "Reduce" {
 		c.ReduceTasks[args.WorkId].Completed = true
 		c.CompletedReduceTasks++
@@ -151,10 +159,15 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		nReduce:           nReduce,
 		InputFiles:        files,
 		IntermediateFiles: make(map[int][]string),
-		TaskTimeout:       10 * time.Second,
+		TaskTimeout:       20 * time.Second,
 		DoneChannel:       make(chan bool),
 	}
-
+	for i := 0; i < len(files); i++ {
+		c.MapTasks = append(c.MapTasks, TaskStatus{})
+	}
+	for i := 0; i < nReduce; i++ {
+		c.ReduceTasks = append(c.ReduceTasks, TaskStatus{})
+	}
 	// Your code here.
 
 	go c.server()

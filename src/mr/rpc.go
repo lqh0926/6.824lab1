@@ -29,7 +29,7 @@ type AssignTask struct {
 type TaskCompleteArgs struct {
 	WorkId            int
 	Worktype          string
-	IntermediateFiles map[int][]string
+	IntermediateFiles map[int]string
 }
 type TaskCompleteReply struct {
 }
