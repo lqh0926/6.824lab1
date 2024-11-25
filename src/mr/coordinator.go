@@ -93,7 +93,7 @@ func (c *Coordinator) MarkTaskCompleted(args *TaskCompleteArgs, reply *TaskCompl
 			c.IntermediateFiles[id] = append(c.IntermediateFiles[id], file)
 		}
 		c.CompletedMapTasks++
-		fmt.Printf("Map Task %v Completed", args.WorkId)
+		//fmt.Printf("Map Task %v Completed", args.WorkId)
 	} else if args.Worktype == "Reduce" {
 		c.ReduceTasks[args.WorkId].Completed = true
 		c.CompletedReduceTasks++
