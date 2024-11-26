@@ -141,25 +141,31 @@ func (rf *Raft) handlerRequestVoteReply(reply RequestVoteReply) {
 	}
 	if reply.voteGranted {
 		rf.votedCount += 1
-		if rf.votedCount > len(rf.peers)/2 {
+		if rf.votedCount == len(rf.peers)/2+1 {
 			rf.state = "leader"
 			rf.electionTimer.Stop()
-			rf.startAppendEntries()
+			rf.logs = append(rf.logs, LogEntry{Term: rf.currentTerm, Logindex: len(rf.logs)})
 		}
 	}
 }
-func (rf *Raft) startAppendEntries() {
-	rf.mu.Lock()
-	currentTerm := rf.currentTerm
-	currentCommit := rf.committedIndex
-	rf.mu.Unlock()
-	for i := 0; i < len(rf.peers); i++ {
-		if i != rf.me {
-			go rf.sendAndHandlerAppendEntries(i, currentTerm, currentCommit)
+func (rf *Raft) TikcerAppendEntries() {
+
+	for {
+		if rf.state == "leader" {
+			rf.mu.Lock()
+			currentTerm := rf.currentTerm
+			currentCommit := rf.committedIndex
+			rf.mu.Unlock()
+			for i := 0; i < len(rf.peers); i++ {
+				if i != rf.me {
+					go rf.sendAndHandleAppendEntries(i, currentTerm, currentCommit)
+				}
+			}
 		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
-func (rf *Raft) sendAndHandleAppendEntries(server int, currentTerm int, currentCommit int, noop bool) {
+func (rf *Raft) sendAndHandleAppendEntries(server int, currentTerm int, currentCommit int) {
 	rf.mu.Lock()
 
 	// 如果当前不是领导者，直接返回
@@ -169,7 +175,7 @@ func (rf *Raft) sendAndHandleAppendEntries(server int, currentTerm int, currentC
 	}
 
 	// 构造 AppendEntriesArgs
-	args := rf.buildAppendEntriesArgs(currentTerm, currentCommit, noop)
+	args := rf.buildAppendEntriesArgs(currentTerm, currentCommit)
 	rf.mu.Unlock()
 
 	// 发送 AppendEntries RPC 并处理回复
@@ -180,18 +186,8 @@ func (rf *Raft) sendAndHandleAppendEntries(server int, currentTerm int, currentC
 }
 
 // 构造 AppendEntriesArgs
-func (rf *Raft) buildAppendEntriesArgs(currentTerm int, currentCommit int, noop bool) AppendEntriesArgs {
+func (rf *Raft) buildAppendEntriesArgs(currentTerm int, currentCommit int) AppendEntriesArgs {
 	lastLogIndex := len(rf.logs) - 1
-	if noop {
-		return AppendEntriesArgs{
-			term:         currentTerm,
-			leaderId:     rf.me,
-			prevLogIndex: rf.logs[lastLogIndex].Logindex,
-			prevLogTerm:  rf.logs[lastLogIndex].Term,
-			entries:      []LogEntry{},
-			leaderCommit: currentCommit,
-		}
-	}
 
 	if rf.logs[lastLogIndex].Logindex < currentCommit {
 		return AppendEntriesArgs{
@@ -239,7 +235,7 @@ func (rf *Raft) handleAppendEntriesReply(server int, args *AppendEntriesArgs, re
 
 	// 如果失败，处理日志不一致问题
 	if reply.conflictIndex != -1 {
-		rf.handleLogConflict(server, reply)
+		rf.handleLogConflict(server, args, reply)
 	}
 }
 
@@ -252,13 +248,25 @@ func (rf *Raft) updateCommitIndex() {
 
 	majorityIndex := matchIndexes[len(matchIndexes)/2]
 	if majorityIndex > rf.committedIndex && rf.logs[majorityIndex].Term == rf.currentTerm {
-		rf.commitIndex = majorityIndex
+		rf.committedIndex = majorityIndex
 	}
 }
 
 // 处理日志冲突
-func (rf *Raft) handleLogConflict(server int, reply *AppendEntriesReply) {
-	rf.nextIndex[server] = reply.conflictIndex
+func (rf *Raft) handleLogConflict(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	if reply.conflictIndex == -1 {
+		return
+	}
+	if reply.conflictIndex != args.prevLogIndex {
+		rf.nextIndex[server] = reply.conflictIndex
+		return
+	}
+	for i := args.prevLogIndex; i >= 0; i-- {
+		if rf.logs[i].Term != args.prevLogTerm {
+			rf.nextIndex[server] = i
+			break
+		}
+	}
 }
 
 func (rf *Raft) resetElectionState() {
@@ -382,6 +390,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.prevLogIndex > rf.logs[len(rf.logs)-1].Logindex {
 		reply.term = rf.currentTerm
 		reply.success = false
+		reply.conflictIndex = len(rf.logs)
+		rf.electionTimer.Reset(rf.electionTimeout)
+		return
+	}
+	if args.prevLogIndex >= 0 && rf.logs[args.prevLogIndex].Term != args.prevLogTerm {
+		reply.term = rf.currentTerm
+		reply.success = false
+		reply.conflictIndex = args.prevLogIndex
+		rf.electionTimer.Reset(rf.electionTimeout)
 		return
 	}
 	if args.prevLogIndex < rf.logs[len(rf.logs)-1].Logindex {
@@ -474,15 +491,10 @@ func (rf *Raft) killed() bool {
 }
 
 func (rf *Raft) ticker() {
-	for rf.killed() == false {
+	for !rf.killed() {
 
-		// Your code here (3A)
-		// Check if a leader election should be started.
-
-		// pause for a random amount of time between 50 and 350
-		// milliseconds.
-		ms := 50 + (rand.Int63() % 300)
-		time.Sleep(time.Duration(ms) * time.Millisecond)
+		rf.runElectionTimer()
+		rf.TikcerAppendEntries()
 	}
 }
 
@@ -501,6 +513,16 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
+	rf.electionTimeout = time.Duration(150+rand.Intn(150)) * time.Millisecond
+	rf.state = "follower"
+	rf.currentTerm = 0
+	rf.votedFor = -1
+	rf.votedCount = 0
+	rf.leaderId = -1
+	rf.logs = append(rf.logs, LogEntry{Term: 0, Logindex: 0})
+	rf.committedIndex = 0
+	rf.nextIndex = make([]int, len(peers))
+	rf.matchIndex = make([]int, len(peers))
 
 	// Your initialization code here (3A, 3B, 3C).
 
