@@ -20,6 +20,7 @@ package raft
 import (
 	//	"bytes"
 
+	"bytes"
 	"fmt"
 	"math/rand"
 	"sort"
@@ -28,6 +29,7 @@ import (
 	"time"
 
 	//	"6.5840/labgob"
+	"6.5840/labgob"
 	"6.5840/labrpc"
 )
 
@@ -146,6 +148,7 @@ func (rf *Raft) handlerRequestVoteReply(reply RequestVoteReply) {
 		rf.votedFor = -1
 		rf.votedCount = 0
 		rf.electionTimer.Reset(rf.electionTimeout + time.Duration(rand.Intn(100))*time.Millisecond)
+		rf.persist()
 		return
 	}
 	if reply.VoteGranted {
@@ -153,6 +156,8 @@ func (rf *Raft) handlerRequestVoteReply(reply RequestVoteReply) {
 		if rf.votedCount == len(rf.peers)/2+1 {
 			rf.state = "leader"
 			rf.electionTimer.Reset(time.Minute)
+			rf.leaderId = rf.me
+			rf.persist()
 			//rf.logs = append(rf.logs, LogEntry{Term: rf.currentTerm, Logindex: len(rf.logs)})
 		}
 	}
@@ -191,6 +196,7 @@ func (rf *Raft) sendAndHandleAppendEntries(server int, currentTerm int, currentC
 
 	// 构造 AppendEntriesArgs
 	args := rf.buildAppendEntriesArgs(server, currentTerm, currentCommit)
+	rf.persist()
 	rf.mu.Unlock()
 
 	// 发送 AppendEntries RPC 并处理回复
@@ -224,6 +230,7 @@ func (rf *Raft) handleAppendEntriesReply(server int, args *AppendEntriesArgs, re
 		rf.currentTerm = reply.Term
 		rf.state = "follower"
 		rf.resetElectionState()
+		rf.persist()
 		return
 	}
 
@@ -308,12 +315,13 @@ func (rf *Raft) GetState() (int, bool) {
 func (rf *Raft) persist() {
 	// Your code here (3C).
 	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// raftstate := w.Bytes()
-	// rf.persister.Save(raftstate, nil)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.logs)
+	raftstate := w.Bytes()
+	rf.persister.Save(raftstate, nil)
 }
 
 // restore previously persisted state.
@@ -323,17 +331,18 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 	// Your code here (3C).
 	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currentTerm int
+	var votedFor int
+	var logs []LogEntry
+	if d.Decode(&currentTerm) != nil || d.Decode(&votedFor) != nil || d.Decode(&logs) != nil {
+		fmt.Println("decode error")
+	} else {
+		rf.currentTerm = currentTerm
+		rf.votedFor = votedFor
+		rf.logs = logs
+	}
 }
 
 // the service says it has created a snapshot that has
@@ -370,6 +379,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if args.Term < rf.currentTerm {
 		reply.VoteGranted = false
 		reply.Term = rf.currentTerm
+		rf.persist()
 		return
 	}
 	if args.Term > rf.currentTerm {
@@ -377,8 +387,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.state = "follower"
 		rf.votedFor = -1
 		rf.votedCount = 0
-		rf.electionTimer.Reset(rf.electionTimeout + time.Duration(rand.Intn(100))*time.Millisecond)
+
 	}
+
 	if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
 		lastLogIndex := rf.logs[len(rf.logs)-1].Logindex
 		lastLogTerm := rf.logs[len(rf.logs)-1].Term
@@ -394,6 +405,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	} else {
 		reply.VoteGranted = false
 	}
+	reply.Term = rf.currentTerm
+	rf.persist()
 
 }
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -409,6 +422,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.currentTerm = args.Term
 		rf.state = "follower"
 		rf.resetElectionState()
+		rf.persist()
 	}
 	if args.PrevLogIndex > rf.logs[len(rf.logs)-1].Logindex {
 		reply.Term = rf.currentTerm
@@ -439,6 +453,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	reply.Success = true
 	reply.Term = rf.currentTerm
 	rf.electionTimer.Reset(rf.electionTimeout + time.Duration(rand.Intn(100))*time.Millisecond)
+	rf.persist()
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -474,6 +489,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 }
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+
 	return ok
 }
 
@@ -502,6 +518,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.logs = append(rf.logs, LogEntry{Term: rf.currentTerm, Logindex: index, Command: command})
 		rf.matchIndex[rf.me] = index
 		rf.nextIndex[rf.me] = index + 1
+		rf.persist()
 
 	}
 
@@ -604,7 +621,7 @@ func (rf *Raft) applyLog(applyCh chan ApplyMsg) {
 
 }
 
-// 定时打印term和state和投票情况和计时器状态
+// 定时打印term和state和投票情况和LOG内容
 func (rf *Raft) printIndex() {
 	for {
 		if rf.killed() {
@@ -612,8 +629,11 @@ func (rf *Raft) printIndex() {
 		}
 		rf.mu.Lock()
 		fmt.Printf("server %d term %d state %s votedFor %d votedCount %d\n", rf.me, rf.currentTerm, rf.state, rf.votedFor, rf.votedCount)
+		for i := 0; i < len(rf.logs); i++ {
+			fmt.Printf("server %d logindex %d logterm %d logcommand %v\n", rf.me, rf.logs[i].Logindex, rf.logs[i].Term, rf.logs[i].Command)
+		}
 		rf.mu.Unlock()
-		time.Sleep(1000 * time.Millisecond)
+		time.Sleep(200 * time.Millisecond)
 
 	}
 }
