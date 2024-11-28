@@ -109,8 +109,9 @@ type Raft struct {
 func (rf *Raft) runElectionTimer() {
 	rf.mu.Lock()
 	rf.electionTimer = time.NewTicker(rf.electionTimeout + time.Duration(rand.Intn(100))*time.Millisecond)
+	electionTime := rf.electionTimer
 	rf.mu.Unlock()
-	for range rf.electionTimer.C {
+	for range electionTime.C {
 		rf.mu.Lock()
 		if rf.killed() {
 			rf.mu.Unlock()
@@ -189,18 +190,18 @@ func (rf *Raft) TikcerAppendEntries() {
 		}
 		rf.mu.Lock()
 		curstate := rf.state
-		rf.mu.Unlock()
 		if curstate == "leader" {
-			rf.mu.Lock()
+
 			currentTerm := rf.currentTerm
 			currentCommit := rf.committedIndex
-			rf.mu.Unlock()
+
 			for i := 0; i < len(rf.peers); i++ {
 				if i != rf.me {
 					go rf.sendAndHandleAppendEntries(i, currentTerm, currentCommit)
 				}
 			}
 		}
+		rf.mu.Unlock()
 		time.Sleep(100 * time.Millisecond)
 	}
 }
@@ -254,7 +255,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapArgs, reply *InstallSnapReply) 
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.state = "follower"
-		rf.resetElectionState()
+		rf.electionTimer.Reset(rf.electionTimeout + time.Duration(rand.Intn(100))*time.Millisecond)
 		rf.persist()
 	}
 	rf.currentTerm = args.Term
@@ -301,6 +302,9 @@ func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapArgs, reply *In
 func (rf *Raft) handleInstallSnapshotReply(server int, args *InstallSnapArgs, reply *InstallSnapReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	if args.Term != rf.currentTerm {
+		return
+	}
 	if reply.Term > rf.currentTerm {
 		rf.currentTerm = reply.Term
 		rf.state = "follower"
@@ -335,7 +339,9 @@ func (rf *Raft) buildAppendEntriesArgs(server int, currentTerm int, currentCommi
 func (rf *Raft) handleAppendEntriesReply(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-
+	if args.Term != rf.currentTerm {
+		return
+	}
 	// 如果回复的任期大于当前任期，切换为跟随者
 	if reply.Term > rf.currentTerm {
 		rf.currentTerm = reply.Term
@@ -517,6 +523,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (3A, 3B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	//打印args和自己和状态
+	fmt.Println("server ", rf.me, " receive requestvote from ", args.CandidateId, " term ", args.LastLogTerm, " logindex ", args.LastLogIndex)
 	if args.Term < rf.currentTerm {
 		reply.VoteGranted = false
 		reply.Term = rf.currentTerm
@@ -542,10 +550,14 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			rf.electionTimer.Reset(rf.electionTimeout + time.Duration(rand.Intn(100))*time.Millisecond)
 		} else {
 			reply.VoteGranted = false
+			fmt.Println("server ", rf.me, " receive requestvote from ", args.CandidateId, " term ", args.LastLogTerm, " logindex ", args.LastLogIndex)
+
+			fmt.Println("server ", rf.me, " vote for ", args.CandidateId, " false", "lastlogindex ", lastLogIndex, " lastlogterm ", lastLogTerm)
 		}
 
 	} else {
 		reply.VoteGranted = false
+		fmt.Println("server ", rf.me, " vote for ", args.CandidateId, " false", "voted for ", rf.votedFor)
 	}
 	reply.Term = rf.currentTerm
 	rf.persist()
@@ -570,7 +582,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.PrevLogIndex > rf.logs[len(rf.logs)-1].Logindex {
 		reply.Term = rf.currentTerm
 		reply.Success = false
-		reply.ConflictIndex = len(rf.logs)
+		reply.ConflictIndex = rf.logs[len(rf.logs)-1].Logindex + 1
 		rf.electionTimer.Reset(rf.electionTimeout + time.Duration(rand.Intn(100))*time.Millisecond)
 		return
 	}
@@ -790,7 +802,7 @@ func (rf *Raft) applyLog(applyCh chan ApplyMsg) {
 				Command:      command,
 				CommandIndex: i,
 			}
-			fmt.Println("server ", rf.me, " apply log ", command, " index ", logs[logIndex].Logindex)
+			//fmt.Println("server ", rf.me, " apply log ", command, " index ", logs[logIndex].Logindex)
 		}
 
 		// 更新 applyIndex 为 committedIndex
