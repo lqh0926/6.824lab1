@@ -98,7 +98,7 @@ type Raft struct {
 
 func (rf *Raft) runElectionTimer() {
 	rf.mu.Lock()
-	rf.electionTimer = time.NewTicker(rf.electionTimeout)
+	rf.electionTimer = time.NewTicker(rf.electionTimeout + time.Duration(rand.Intn(100))*time.Millisecond)
 	rf.mu.Unlock()
 	for range rf.electionTimer.C {
 		rf.mu.Lock()
@@ -145,15 +145,15 @@ func (rf *Raft) handlerRequestVoteReply(reply RequestVoteReply) {
 		rf.state = "follower"
 		rf.votedFor = -1
 		rf.votedCount = 0
-		rf.electionTimer.Reset(rf.electionTimeout)
+		rf.electionTimer.Reset(rf.electionTimeout + time.Duration(rand.Intn(100))*time.Millisecond)
 		return
 	}
 	if reply.VoteGranted {
 		rf.votedCount += 1
 		if rf.votedCount == len(rf.peers)/2+1 {
 			rf.state = "leader"
-			rf.electionTimer.Stop()
-			rf.logs = append(rf.logs, LogEntry{Term: rf.currentTerm, Logindex: len(rf.logs)})
+			rf.electionTimer.Reset(time.Minute)
+			//rf.logs = append(rf.logs, LogEntry{Term: rf.currentTerm, Logindex: len(rf.logs)})
 		}
 	}
 }
@@ -190,7 +190,7 @@ func (rf *Raft) sendAndHandleAppendEntries(server int, currentTerm int, currentC
 	}
 
 	// 构造 AppendEntriesArgs
-	args := rf.buildAppendEntriesArgs(currentTerm, currentCommit)
+	args := rf.buildAppendEntriesArgs(server, currentTerm, currentCommit)
 	rf.mu.Unlock()
 
 	// 发送 AppendEntries RPC 并处理回复
@@ -201,37 +201,17 @@ func (rf *Raft) sendAndHandleAppendEntries(server int, currentTerm int, currentC
 }
 
 // 构造 AppendEntriesArgs
-func (rf *Raft) buildAppendEntriesArgs(currentTerm int, currentCommit int) AppendEntriesArgs {
-	lastLogIndex := len(rf.logs) - 1
+func (rf *Raft) buildAppendEntriesArgs(server int, currentTerm int, currentCommit int) AppendEntriesArgs {
 
-	if rf.logs[lastLogIndex].Logindex < currentCommit {
-		return AppendEntriesArgs{
-			Term:         currentTerm,
-			LeaderId:     rf.me,
-			PrevLogIndex: rf.logs[lastLogIndex].Logindex,
-			PrevLogTerm:  rf.logs[lastLogIndex].Term,
-			Entries:      []LogEntry{},
-			LeaderCommit: currentCommit,
-		}
-	}
-	if currentCommit == 0 {
-		return AppendEntriesArgs{
-			Term:         currentTerm,
-			LeaderId:     rf.me,
-			PrevLogIndex: -1,
-			PrevLogTerm:  -1,
-			Entries:      rf.logs,
-			LeaderCommit: currentCommit,
-		}
-	}
-	return AppendEntriesArgs{
+	args := AppendEntriesArgs{
 		Term:         currentTerm,
 		LeaderId:     rf.me,
-		PrevLogIndex: rf.logs[currentCommit-1].Logindex,
-		PrevLogTerm:  rf.logs[currentCommit-1].Term,
-		Entries:      rf.logs[currentCommit:],
+		PrevLogIndex: rf.nextIndex[server] - 1,
+		PrevLogTerm:  rf.logs[rf.nextIndex[server]-1].Term,
 		LeaderCommit: currentCommit,
+		Entries:      rf.logs[rf.nextIndex[server]:],
 	}
+	return args
 }
 
 // 处理 AppendEntriesReply
@@ -300,7 +280,7 @@ func (rf *Raft) handleLogConflict(server int, args *AppendEntriesArgs, reply *Ap
 func (rf *Raft) resetElectionState() {
 	rf.votedFor = -1
 	rf.votedCount = 0
-	rf.electionTimer.Reset(rf.electionTimeout)
+	rf.electionTimer.Reset(rf.electionTimeout + time.Duration(rand.Intn(100))*time.Millisecond)
 }
 
 // return currentTerm and whether this server
@@ -395,12 +375,22 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.state = "follower"
-		rf.resetElectionState()
+		rf.votedFor = -1
+		rf.votedCount = 0
+		rf.electionTimer.Reset(rf.electionTimeout + time.Duration(rand.Intn(100))*time.Millisecond)
 	}
 	if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
-		reply.VoteGranted = true
-		rf.votedFor = args.CandidateId
-		rf.electionTimer.Reset(rf.electionTimeout)
+		lastLogIndex := rf.logs[len(rf.logs)-1].Logindex
+		lastLogTerm := rf.logs[len(rf.logs)-1].Term
+		if args.LastLogTerm > lastLogTerm || (args.LastLogTerm == lastLogTerm && args.LastLogIndex >= lastLogIndex) {
+
+			reply.VoteGranted = true
+			rf.votedFor = args.CandidateId
+			rf.electionTimer.Reset(rf.electionTimeout + time.Duration(rand.Intn(100))*time.Millisecond)
+		} else {
+			reply.VoteGranted = false
+		}
+
 	} else {
 		reply.VoteGranted = false
 	}
@@ -412,6 +402,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.Term < rf.currentTerm {
 		reply.Success = false
 		reply.Term = rf.currentTerm
+		reply.ConflictIndex = -1
 		return
 	}
 	if args.Term > rf.currentTerm {
@@ -423,14 +414,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Term = rf.currentTerm
 		reply.Success = false
 		reply.ConflictIndex = len(rf.logs)
-		rf.electionTimer.Reset(rf.electionTimeout)
+		rf.electionTimer.Reset(rf.electionTimeout + time.Duration(rand.Intn(100))*time.Millisecond)
 		return
 	}
 	if args.PrevLogIndex >= 0 && rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm {
 		reply.Term = rf.currentTerm
 		reply.Success = false
 		reply.ConflictIndex = args.PrevLogIndex
-		rf.electionTimer.Reset(rf.electionTimeout)
+		rf.electionTimer.Reset(rf.electionTimeout + time.Duration(rand.Intn(100))*time.Millisecond)
 		return
 	}
 	if args.PrevLogIndex >= 0 && args.PrevLogIndex < rf.logs[len(rf.logs)-1].Logindex {
@@ -447,9 +438,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	reply.Success = true
 	reply.Term = rf.currentTerm
-	rf.nextIndex[args.LeaderId] = args.PrevLogIndex + len(args.Entries) + 1
-	rf.matchIndex[args.LeaderId] = rf.nextIndex[args.LeaderId] - 1
-	rf.electionTimer.Reset(rf.electionTimeout)
+	rf.electionTimer.Reset(rf.electionTimeout + time.Duration(rand.Intn(100))*time.Millisecond)
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -562,7 +551,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
-	rf.electionTimeout = time.Duration(300+rand.Intn(200)) * time.Millisecond
+	rf.electionTimeout = time.Duration(300) * time.Millisecond
 	rf.state = "follower"
 	rf.currentTerm = 0
 	rf.votedFor = -1
@@ -574,6 +563,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.waitapply = make(chan struct{}, 1)
 	rf.nextIndex = make([]int, len(peers))
 	rf.matchIndex = make([]int, len(peers))
+	for i := 0; i < len(peers); i++ {
+		rf.nextIndex[i] = 1
+		rf.matchIndex[i] = 0
+	}
 
 	// Your initialization code here (3A, 3B, 3C).
 
@@ -583,7 +576,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// start ticker goroutine to start elections
 	rf.ticker()
 	go rf.applyLog(applyCh)
-	go rf.printIndex()
+	//go rf.printIndex()
 	return rf
 }
 
@@ -591,7 +584,7 @@ func (rf *Raft) applyLog(applyCh chan ApplyMsg) {
 	for {
 		<-rf.waitapply
 		if rf.killed() {
-			return
+			continue
 		}
 		rf.mu.Lock()
 		commitindex := rf.committedIndex
@@ -599,6 +592,7 @@ func (rf *Raft) applyLog(applyCh chan ApplyMsg) {
 		for commitindex > rf.applyIndex {
 			for i := rf.applyIndex + 1; i <= rf.committedIndex; i++ {
 				applyCh <- ApplyMsg{CommandValid: true, Command: rf.logs[i].Command, CommandIndex: i}
+				//fmt.Println("server ", rf.me, " apply log ", rf.logs[i].Command, " index ", rf.logs[i].Logindex)
 			}
 			rf.applyIndex = rf.committedIndex
 			rf.mu.Lock()
@@ -610,17 +604,16 @@ func (rf *Raft) applyLog(applyCh chan ApplyMsg) {
 
 }
 
-// 定时打印committedIndex和applyIndex
+// 定时打印term和state和投票情况和计时器状态
 func (rf *Raft) printIndex() {
 	for {
 		if rf.killed() {
 			return
 		}
 		rf.mu.Lock()
-		committedIndex := rf.committedIndex
-		applyIndex := rf.applyIndex
+		fmt.Printf("server %d term %d state %s votedFor %d votedCount %d\n", rf.me, rf.currentTerm, rf.state, rf.votedFor, rf.votedCount)
 		rf.mu.Unlock()
-		fmt.Printf("server %d committedIndex %d applyIndex %d\n", rf.me, committedIndex, applyIndex)
 		time.Sleep(1000 * time.Millisecond)
+
 	}
 }
