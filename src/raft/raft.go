@@ -106,12 +106,30 @@ type Raft struct {
 
 }
 
+// type myticker struct {
+// 	ticker *time.Ticker
+// 	server int
+// }
+
+// func makeTicker(d time.Duration, s int) *myticker {
+// 	return &myticker{time.NewTicker(d), s}
+// }
+// func (t *myticker) C() <-chan time.Time {
+// 	fmt.Println("server ", t.server, " ticker")
+// 	return t.ticker.C
+// }
+// func (t *myticker) Reset(d time.Duration) {
+// 	fmt.Println("server ", t.server, " reset")
+// 	t.ticker.Reset(d)
+// }
+
 func (rf *Raft) runElectionTimer() {
 	rf.mu.Lock()
 	rf.electionTimer = time.NewTicker(rf.electionTimeout + time.Duration(rand.Intn(100))*time.Millisecond)
 	electionTime := rf.electionTimer
 	rf.mu.Unlock()
 	for range electionTime.C {
+		//fmt.Println("server ", electionTime.server, " ticker")
 		rf.mu.Lock()
 		if rf.killed() {
 			rf.mu.Unlock()
@@ -396,8 +414,8 @@ func (rf *Raft) handleLogConflict(server int, args *AppendEntriesArgs, reply *Ap
 	if rf.snapshot.LastIncludedIndex >= args.PrevLogIndex {
 		return
 	}
-	rf.nextIndex[server] = 1
-	for i := args.PrevLogIndex; i >= 1; i-- {
+	rf.nextIndex[server] = rf.snapshot.LastIncludedIndex + 1
+	for i := args.PrevLogIndex; i >= rf.snapshot.LastIncludedIndex+1; i-- {
 		if rf.logs[i-rf.snapshot.LastIncludedIndex].Term != args.PrevLogTerm {
 			rf.nextIndex[server] = i
 			break
@@ -524,7 +542,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	//打印args和自己和状态
-	fmt.Println("server ", rf.me, " receive requestvote from ", args.CandidateId, " term ", args.LastLogTerm, " logindex ", args.LastLogIndex)
+	//fmt.Println("server ", rf.me, " receive requestvote from ", args.CandidateId, " term ", args.LastLogTerm, " logindex ", args.LastLogIndex)
 	if args.Term < rf.currentTerm {
 		reply.VoteGranted = false
 		reply.Term = rf.currentTerm
@@ -532,10 +550,14 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		return
 	}
 	if args.Term > rf.currentTerm {
+		//fmt.Print("server ", rf.me, " ", rf.currentTerm, " ", args.Term)
 		rf.currentTerm = args.Term
-		rf.state = "follower"
-		rf.votedFor = -1
-		rf.votedCount = 0
+		if rf.state != "follower" {
+			rf.resetElectionState()
+			rf.state = "follower"
+		} else {
+			rf.votedFor = -1
+		}
 
 	}
 
@@ -550,14 +572,14 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			rf.electionTimer.Reset(rf.electionTimeout + time.Duration(rand.Intn(100))*time.Millisecond)
 		} else {
 			reply.VoteGranted = false
-			fmt.Println("server ", rf.me, " receive requestvote from ", args.CandidateId, " term ", args.LastLogTerm, " logindex ", args.LastLogIndex)
+			//fmt.Println("server ", rf.me, " receive requestvote from ", args.CandidateId, " term ", args.LastLogTerm, " logindex ", args.LastLogIndex)
 
-			fmt.Println("server ", rf.me, " vote for ", args.CandidateId, " false", "lastlogindex ", lastLogIndex, " lastlogterm ", lastLogTerm)
+			//fmt.Println("server ", rf.me, " vote for ", args.CandidateId, " false", "lastlogindex ", lastLogIndex, " lastlogterm ", lastLogTerm)
 		}
 
 	} else {
 		reply.VoteGranted = false
-		fmt.Println("server ", rf.me, " vote for ", args.CandidateId, " false", "voted for ", rf.votedFor)
+		//fmt.Println("server ", rf.me, " vote for ", args.CandidateId, " false", "voted for ", rf.votedFor)
 	}
 	reply.Term = rf.currentTerm
 	rf.persist()
@@ -820,6 +842,8 @@ func (rf *Raft) printIndex() {
 		}
 		rf.mu.Lock()
 		fmt.Printf("server %d term %d state %s votedFor %d votedCount %d\n", rf.me, rf.currentTerm, rf.state, rf.votedFor, rf.votedCount)
+		//打印计时器
+		//fmt.Println("server ", rf.me, " electiontimer ", rf.electionTimer)
 		// //打印applyid和commitid
 		// fmt.Printf("server %d applyIndex %d commitIndex %d\n", rf.me, rf.applyIndex, rf.committedIndex)
 		// // for i := 0; i < len(rf.logs); i++ {
