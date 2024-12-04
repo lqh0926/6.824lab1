@@ -135,6 +135,7 @@ func (rf *Raft) runElectionTimer() {
 			rf.mu.Unlock()
 			return
 		}
+		rf.electionTimer.Reset(rf.electionTimeout + time.Duration(rand.Intn(100))*time.Millisecond)
 		if rf.state == "leader" {
 			rf.mu.Unlock()
 			continue
@@ -698,6 +699,13 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.matchIndex[rf.me] = index
 		rf.nextIndex[rf.me] = index + 1
 		rf.persist()
+		currentTerm := rf.currentTerm
+		currentCommit := rf.committedIndex
+		for i := 0; i < len(rf.peers); i++ {
+			if i != rf.me {
+				go rf.sendAndHandleAppendEntries(i, currentTerm, currentCommit)
+			}
+		}
 
 	}
 
@@ -773,7 +781,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// start ticker goroutine to start elections
 	rf.ticker()
 	go rf.applyLog(applyCh)
-	go rf.printIndex()
+	//go rf.printIndex()
 	return rf
 }
 
@@ -813,8 +821,13 @@ func (rf *Raft) applyLog(applyCh chan ApplyMsg) {
 		}
 
 		// 应用日志条目
+		willapplyedindex := committedIndex
 		for i := applyIndex + 1; i <= committedIndex; i++ {
 			// 获取日志条目（这部分是在没有锁的情况下执行的）
+			if i-snapshot.LastIncludedIndex >= len(logs) {
+				willapplyedindex = i - 1
+				break
+			}
 			logIndex := i - snapshot.LastIncludedIndex
 			command := logs[logIndex].Command
 
@@ -829,7 +842,7 @@ func (rf *Raft) applyLog(applyCh chan ApplyMsg) {
 
 		// 更新 applyIndex 为 committedIndex
 		rf.mu.Lock()
-		rf.applyIndex = committedIndex
+		rf.applyIndex = willapplyedindex
 		rf.mu.Unlock()
 	}
 }
@@ -845,7 +858,7 @@ func (rf *Raft) printIndex() {
 		//打印计时器
 		//fmt.Println("server ", rf.me, " electiontimer ", rf.electionTimer)
 		// //打印applyid和commitid
-		// fmt.Printf("server %d applyIndex %d commitIndex %d\n", rf.me, rf.applyIndex, rf.committedIndex)
+		//fmt.Printf("server %d applyIndex %d commitIndex %d\n", rf.me, rf.applyIndex, rf.committedIndex)
 		// // for i := 0; i < len(rf.logs); i++ {
 		// // 	fmt.Printf("server %d logindex %d logterm %d logcommand %v\n", rf.me, rf.logs[i].Logindex, rf.logs[i].Term, rf.logs[i].Command)
 		// // }
