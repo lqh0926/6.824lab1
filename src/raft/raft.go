@@ -54,6 +54,15 @@ type ApplyMsg struct {
 	SnapshotTerm  int
 	SnapshotIndex int
 }
+
+// minInt returns the smaller of x or y.
+func minInt(x, y int) int {
+	if x < y {
+		return x
+	}
+	return y
+}
+
 type LogEntry struct {
 	Term     int
 	Logindex int
@@ -125,7 +134,7 @@ type Raft struct {
 
 func (rf *Raft) runElectionTimer() {
 	rf.mu.Lock()
-	rf.electionTimer = time.NewTicker(rf.electionTimeout + time.Duration(rand.Intn(100))*time.Millisecond)
+
 	electionTime := rf.electionTimer
 	rf.mu.Unlock()
 	for range electionTime.C {
@@ -396,6 +405,7 @@ func (rf *Raft) updateCommitIndex() {
 	majorityIndex := matchIndexes[len(matchIndexes)/2]
 	if majorityIndex > rf.committedIndex && rf.logs[majorityIndex-rf.snapshot.LastIncludedIndex].Term == rf.currentTerm {
 		rf.committedIndex = majorityIndex
+		//fmt.Println("server ", rf.me, " commit ", rf.committedIndex, "update")
 		select {
 		case rf.waitapply <- struct{}{}:
 		default:
@@ -609,6 +619,16 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.electionTimer.Reset(rf.electionTimeout + time.Duration(rand.Intn(100))*time.Millisecond)
 		return
 	}
+	if args.Entries != nil && args.Entries[len(args.Entries)-1].Logindex < rf.logs[len(rf.logs)-1].Logindex {
+		reply.Term = rf.currentTerm
+		reply.Success = false
+		return
+	}
+	if args.PrevLogIndex-rf.snapshot.LastIncludedIndex < 0 {
+		args.PrevLogIndex = rf.snapshot.LastIncludedIndex
+		args.PrevLogTerm = rf.snapshot.LastIncludedTerm
+		args.Entries = args.Entries[rf.snapshot.LastIncludedIndex-args.PrevLogIndex:]
+	}
 	if args.PrevLogIndex >= 0 && rf.logs[args.PrevLogIndex-rf.snapshot.LastIncludedIndex].Term != args.PrevLogTerm {
 		//fmt.Print("server ", rf.me, " ", rf.logs[args.PrevLogIndex-rf.snapshot.LastIncludedIndex].Term, " ", args.PrevLogTerm)
 		reply.Term = rf.currentTerm
@@ -617,13 +637,19 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.electionTimer.Reset(rf.electionTimeout + time.Duration(rand.Intn(100))*time.Millisecond)
 		return
 	}
-	//fmt.Println("server ", rf.me, " a")
+	if args.Entries == nil {
+		//fmt.Println("server ", rf.me, " receive heartbeat from ", args.LeaderId, " term ", args.Term)
+	}
 	if args.PrevLogIndex >= 0 && args.PrevLogIndex < rf.logs[len(rf.logs)-1].Logindex {
 		rf.logs = rf.logs[:args.PrevLogIndex-rf.snapshot.LastIncludedIndex+1]
+		//fmt.Println("server ", rf.me, " trim ", rf.committedIndex, len(rf.logs))
+
 	}
 	rf.logs = append(rf.logs, args.Entries...)
+	//fmt.Println("server ", rf.me, " add ", rf.committedIndex, len(rf.logs))
 	if args.LeaderCommit > rf.committedIndex {
 		rf.committedIndex = args.LeaderCommit
+		//fmt.Println("server ", rf.me, " commit ", rf.committedIndex, len(rf.logs))
 		select {
 		case rf.waitapply <- struct{}{}:
 		default:
@@ -756,6 +782,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persister = persister
 	rf.me = me
 	rf.electionTimeout = time.Duration(300) * time.Millisecond
+	rf.electionTimer = time.NewTicker(rf.electionTimeout + time.Duration(rand.Intn(100))*time.Millisecond)
 	rf.state = "follower"
 	rf.currentTerm = 0
 	rf.votedFor = -1
@@ -797,7 +824,7 @@ func (rf *Raft) applyLog(applyCh chan ApplyMsg) {
 		applyIndex := rf.applyIndex
 		committedIndex := rf.committedIndex
 		snapshot := rf.snapshot
-		logs := rf.logs
+		//logs := rf.logs
 		rf.mu.Unlock()
 
 		// 如果当前没有日志需要应用，直接跳过
@@ -821,16 +848,16 @@ func (rf *Raft) applyLog(applyCh chan ApplyMsg) {
 		}
 
 		// 应用日志条目
-		willapplyedindex := committedIndex
 		for i := applyIndex + 1; i <= committedIndex; i++ {
 			// 获取日志条目（这部分是在没有锁的情况下执行的）
-			if i-snapshot.LastIncludedIndex >= len(logs) {
-				willapplyedindex = i - 1
-				break
-			}
+			// if i-snapshot.LastIncludedIndex >= len(logs) {
+			// 	willapplyedindex = i - 1
+			// 	break
+			// }
 			logIndex := i - snapshot.LastIncludedIndex
-			command := logs[logIndex].Command
-
+			rf.mu.Lock()
+			command := rf.logs[logIndex].Command
+			rf.mu.Unlock()
 			// 发送日志条目到 applyCh
 			applyCh <- ApplyMsg{
 				CommandValid: true,
@@ -842,7 +869,7 @@ func (rf *Raft) applyLog(applyCh chan ApplyMsg) {
 
 		// 更新 applyIndex 为 committedIndex
 		rf.mu.Lock()
-		rf.applyIndex = willapplyedindex
+		rf.applyIndex = committedIndex
 		rf.mu.Unlock()
 	}
 }
@@ -874,4 +901,7 @@ func (rf *Raft) printIndex() {
 		time.Sleep(200 * time.Millisecond)
 
 	}
+}
+func (rf *Raft) GetRaftStateSize() int {
+	return rf.persister.RaftStateSize()
 }

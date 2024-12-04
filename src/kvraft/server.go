@@ -1,6 +1,7 @@
 package kvraft
 
 import (
+	"bytes"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -36,12 +37,12 @@ func (op *Op) String() string {
 }
 
 type KVServer struct {
-	mu      sync.Mutex
-	me      int
-	rf      *raft.Raft
-	applyCh chan raft.ApplyMsg
-	dead    int32 // set by Kill()
-
+	mu           sync.Mutex
+	me           int
+	rf           *raft.Raft
+	applyCh      chan raft.ApplyMsg
+	dead         int32 // set by Kill()
+	applied      int
 	maxraftstate int // snapshot if log grows this big
 	// Your definitions here.
 	kvMap       map[string]string
@@ -91,14 +92,14 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 
 		reply.Err = ErrTimeOut
 		kv.mu.Lock()
-		close(repch)
+
 		delete(kv.startedmsgs[args.ClientId], args.ClinetSeq)
 		kv.mu.Unlock()
 		return
 
 	case reply1 := <-repch:
 		kv.mu.Lock()
-		close(repch)
+
 		delete(kv.startedmsgs[args.ClientId], args.ClinetSeq)
 		kv.mu.Unlock()
 		if reply1 == nil {
@@ -158,7 +159,7 @@ func (kv *KVServer) Put(args *PutAppendArgs, reply *PutAppendReply) {
 	select {
 	case <-time.After(500 * time.Millisecond):
 		kv.mu.Lock()
-		close(repch)
+
 		delete(kv.startedmsgs[args.ClientId], args.ClinetSeq)
 		kv.mu.Unlock()
 		reply.Err = ErrTimeOut
@@ -167,7 +168,7 @@ func (kv *KVServer) Put(args *PutAppendArgs, reply *PutAppendReply) {
 	case reply1 := <-repch:
 
 		kv.mu.Lock()
-		close(repch)
+
 		delete(kv.startedmsgs[args.ClientId], args.ClinetSeq)
 		kv.mu.Unlock()
 		if reply1 == nil {
@@ -209,7 +210,7 @@ func (kv *KVServer) Append(args *PutAppendArgs, reply *PutAppendReply) {
 	select {
 	case <-time.After(500 * time.Millisecond):
 		kv.mu.Lock()
-		close(repch)
+
 		delete(kv.startedmsgs[args.ClientId], args.ClinetSeq)
 		kv.mu.Unlock()
 		reply.Err = ErrTimeOut
@@ -217,7 +218,7 @@ func (kv *KVServer) Append(args *PutAppendArgs, reply *PutAppendReply) {
 
 	case reply1 := <-repch:
 		kv.mu.Lock()
-		close(repch)
+
 		delete(kv.startedmsgs[args.ClientId], args.ClinetSeq)
 		kv.mu.Unlock()
 		if reply1 == nil {
@@ -282,7 +283,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.startedmsgs = make(map[int]map[int]chan interface{})
 	kv.applyedmsgs = make(map[int]int)
 	kv.replys = make(map[int]map[int]interface{})
-
+	go kv.TickerSnapShot()
 	go kv.handleApplyCh()
 	return kv
 }
@@ -297,6 +298,18 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 func (kv *KVServer) handleApplyCh() {
 	for !kv.killed() {
 		msg := <-kv.applyCh
+		if msg.SnapshotValid {
+
+			kv.mu.Lock()
+			if msg.CommandIndex <= kv.applied {
+				kv.mu.Unlock()
+				continue
+			} else {
+				kv.applied = msg.CommandIndex
+				kv.ReadSnapshot(msg.Snapshot)
+				kv.mu.Unlock()
+			}
+		}
 		if msg.CommandValid {
 			op := msg.Command.(Op)
 			clientid := op.ClientId
@@ -307,7 +320,7 @@ func (kv *KVServer) handleApplyCh() {
 				kv.mu.Unlock()
 				continue
 			}
-
+			kv.applied = msg.CommandIndex
 			kv.applyedmsgs[clientid] = clientseq
 			switch op.Opration {
 			case "Get":
@@ -371,5 +384,34 @@ func (kv *KVServer) handleApplyCh() {
 			}
 			kv.mu.Unlock()
 		}
+	}
+}
+
+func (kv *KVServer) GetSnapshot() []byte {
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(kv.kvMap)
+	e.Encode(kv.applyedmsgs)
+	e.Encode(kv.replys)
+	e.Encode(kv.startedmsgs)
+	return w.Bytes()
+}
+
+func (kv *KVServer) ReadSnapshot(data []byte) {
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	if d.Decode(&kv.kvMap) != nil || d.Decode(&kv.applyedmsgs) != nil || d.Decode(&kv.replys) != nil || d.Decode(&kv.startedmsgs) != nil {
+		log.Fatal("read snapshot error")
+	}
+}
+
+func (kv *KVServer) TickerSnapShot() {
+	for !kv.killed() {
+		if kv.maxraftstate != -1 && kv.rf.GetRaftStateSize() > kv.maxraftstate {
+			kv.mu.Lock()
+			kv.rf.Snapshot(kv.applied, kv.GetSnapshot())
+			kv.mu.Unlock()
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 }
