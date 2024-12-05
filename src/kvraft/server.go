@@ -268,7 +268,10 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// call labgob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
 	labgob.Register(Op{})
-
+	labgob.Register(GetArgs{})
+	labgob.Register(GetReply{})
+	labgob.Register(PutAppendArgs{})
+	labgob.Register(PutAppendReply{})
 	kv := new(KVServer)
 	kv.me = me
 	kv.maxraftstate = maxraftstate
@@ -301,11 +304,11 @@ func (kv *KVServer) handleApplyCh() {
 		if msg.SnapshotValid {
 
 			kv.mu.Lock()
-			if msg.CommandIndex <= kv.applied {
+			if msg.SnapshotIndex <= kv.applied {
 				kv.mu.Unlock()
 				continue
 			} else {
-				kv.applied = msg.CommandIndex
+				kv.applied = msg.SnapshotIndex
 				kv.ReadSnapshot(msg.Snapshot)
 				kv.mu.Unlock()
 			}
@@ -387,22 +390,35 @@ func (kv *KVServer) handleApplyCh() {
 	}
 }
 
+type Snapshot struct {
+	KvMap       map[string]string
+	Applyedmsgs map[int]int
+}
+
 func (kv *KVServer) GetSnapshot() []byte {
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
-	e.Encode(kv.kvMap)
-	e.Encode(kv.applyedmsgs)
-	e.Encode(kv.replys)
-	e.Encode(kv.startedmsgs)
+	snp := Snapshot{KvMap: kv.kvMap, Applyedmsgs: kv.applyedmsgs}
+	if err := e.Encode(snp); err != nil {
+		log.Fatalf("encode snapshot error: %v", err)
+	}
 	return w.Bytes()
 }
 
 func (kv *KVServer) ReadSnapshot(data []byte) {
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
-	if d.Decode(&kv.kvMap) != nil || d.Decode(&kv.applyedmsgs) != nil || d.Decode(&kv.replys) != nil || d.Decode(&kv.startedmsgs) != nil {
+	snp := Snapshot{}
+	if d.Decode(&snp) != nil {
 		log.Fatal("read snapshot error")
 	}
+	kv.kvMap = snp.KvMap
+	kv.applyedmsgs = snp.Applyedmsgs
+
+	// if d.Decode(&kv.kvMap) != nil || d.Decode(&kv.applyedmsgs) != nil || d.Decode(&kv.replys) != nil || d.Decode(&kv.startedmsgs) != nil {
+	// 	log.Fatal("read snapshot error")
+	// }
+	//fmt.Print("read snapshot")
 }
 
 func (kv *KVServer) TickerSnapShot() {
@@ -412,6 +428,6 @@ func (kv *KVServer) TickerSnapShot() {
 			kv.rf.Snapshot(kv.applied, kv.GetSnapshot())
 			kv.mu.Unlock()
 		}
-		time.Sleep(100 * time.Millisecond)
+
 	}
 }

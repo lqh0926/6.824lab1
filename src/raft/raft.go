@@ -280,6 +280,11 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapArgs, reply *InstallSnapReply) 
 		reply.Success = false
 		return
 	}
+	if args.LastIncludedIndex < rf.snapshot.LastIncludedIndex {
+		reply.Term = rf.currentTerm
+		reply.Success = true
+		return
+	}
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.state = "follower"
@@ -292,8 +297,15 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapArgs, reply *InstallSnapReply) 
 
 	rf.snapshot.LastIncludedIndex = args.LastIncludedIndex
 	rf.snapshot.LastIncludedTerm = args.LastIncludedTerm
-	rf.logs = []LogEntry{{Term: rf.snapshot.LastIncludedTerm, Logindex: rf.snapshot.LastIncludedIndex}}
-	rf.committedIndex = rf.snapshot.LastIncludedIndex
+	if args.LastIncludedIndex < rf.logs[len(rf.logs)-1].Logindex {
+		rf.logs = rf.logs[args.LastIncludedIndex-rf.logs[0].Logindex:]
+	} else {
+
+		rf.logs = []LogEntry{{Term: rf.snapshot.LastIncludedTerm, Logindex: rf.snapshot.LastIncludedIndex}}
+	}
+	if rf.committedIndex < rf.snapshot.LastIncludedIndex {
+		rf.committedIndex = rf.snapshot.LastIncludedIndex
+	}
 	rf.snapshot.Data = args.Data
 
 	select {
@@ -619,15 +631,26 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.electionTimer.Reset(rf.electionTimeout + time.Duration(rand.Intn(100))*time.Millisecond)
 		return
 	}
-	if args.Entries != nil && args.Entries[len(args.Entries)-1].Logindex < rf.logs[len(rf.logs)-1].Logindex {
+	// if args.Entries != nil && args.Entries[len(args.Entries)-1].Logindex < rf.logs[len(rf.logs)-1].Logindex {
+	// 	reply.Term = rf.currentTerm
+	// 	reply.Success = false
+	// 	return
+	// }
+	if args.Entries != nil && args.Entries[len(args.Entries)-1].Logindex < rf.snapshot.LastIncludedIndex {
 		reply.Term = rf.currentTerm
 		reply.Success = false
 		return
 	}
 	if args.PrevLogIndex-rf.snapshot.LastIncludedIndex < 0 {
+		if args.Entries == nil {
+			reply.Success = true
+			reply.Term = rf.currentTerm
+			return
+		}
+		args.Entries = args.Entries[rf.snapshot.LastIncludedIndex-args.PrevLogIndex:]
 		args.PrevLogIndex = rf.snapshot.LastIncludedIndex
 		args.PrevLogTerm = rf.snapshot.LastIncludedTerm
-		args.Entries = args.Entries[rf.snapshot.LastIncludedIndex-args.PrevLogIndex:]
+
 	}
 	if args.PrevLogIndex >= 0 && rf.logs[args.PrevLogIndex-rf.snapshot.LastIncludedIndex].Term != args.PrevLogTerm {
 		//fmt.Print("server ", rf.me, " ", rf.logs[args.PrevLogIndex-rf.snapshot.LastIncludedIndex].Term, " ", args.PrevLogTerm)
@@ -637,15 +660,22 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.electionTimer.Reset(rf.electionTimeout + time.Duration(rand.Intn(100))*time.Millisecond)
 		return
 	}
-	if args.Entries == nil {
-		//fmt.Println("server ", rf.me, " receive heartbeat from ", args.LeaderId, " term ", args.Term)
-	}
-	if args.PrevLogIndex >= 0 && args.PrevLogIndex < rf.logs[len(rf.logs)-1].Logindex {
-		rf.logs = rf.logs[:args.PrevLogIndex-rf.snapshot.LastIncludedIndex+1]
+	if args.PrevLogIndex >= 0 && args.PrevLogIndex <= rf.logs[len(rf.logs)-1].Logindex {
+		//fmt.Println("server ", rf.me, " trimbefore ", rf.committedIndex, len(rf.logs))
+		if rf.logs[len(rf.logs)-1].Logindex > args.PrevLogIndex+len(args.Entries) {
+			for i := 0; i < len(args.Entries); i++ {
+				rf.logs[i+1+args.PrevLogIndex-rf.snapshot.LastIncludedIndex] = args.Entries[i]
+			}
+		} else {
+
+			rf.logs = rf.logs[:args.PrevLogIndex-rf.snapshot.LastIncludedIndex+1]
+			rf.logs = append(rf.logs, args.Entries...)
+		}
 		//fmt.Println("server ", rf.me, " trim ", rf.committedIndex, len(rf.logs))
 
 	}
-	rf.logs = append(rf.logs, args.Entries...)
+
+	//fmt.Println("server ", rf.me, " append ", rf.committedIndex, len(rf.logs))
 	//fmt.Println("server ", rf.me, " add ", rf.committedIndex, len(rf.logs))
 	if args.LeaderCommit > rf.committedIndex {
 		rf.committedIndex = args.LeaderCommit
@@ -824,7 +854,7 @@ func (rf *Raft) applyLog(applyCh chan ApplyMsg) {
 		applyIndex := rf.applyIndex
 		committedIndex := rf.committedIndex
 		snapshot := rf.snapshot
-		//logs := rf.logs
+		logs := rf.logs
 		rf.mu.Unlock()
 
 		// 如果当前没有日志需要应用，直接跳过
@@ -855,9 +885,9 @@ func (rf *Raft) applyLog(applyCh chan ApplyMsg) {
 			// 	break
 			// }
 			logIndex := i - snapshot.LastIncludedIndex
-			rf.mu.Lock()
-			command := rf.logs[logIndex].Command
-			rf.mu.Unlock()
+
+			command := logs[logIndex].Command
+
 			// 发送日志条目到 applyCh
 			applyCh <- ApplyMsg{
 				CommandValid: true,
