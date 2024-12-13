@@ -8,11 +8,14 @@ package shardkv
 // talks to the group that holds the key's shard.
 //
 
-import "6.5840/labrpc"
-import "crypto/rand"
-import "math/big"
-import "6.5840/shardctrler"
-import "time"
+import (
+	"crypto/rand"
+	"math/big"
+	"time"
+
+	"6.5840/labrpc"
+	"6.5840/shardctrler"
+)
 
 // which shard is a key in?
 // please use this function,
@@ -38,6 +41,8 @@ type Clerk struct {
 	config   shardctrler.Config
 	make_end func(string) *labrpc.ClientEnd
 	// You will have to modify this struct.
+	clientId int
+	seq      int
 }
 
 // the tester calls MakeClerk.
@@ -52,6 +57,10 @@ func MakeClerk(ctrlers []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 	ck.sm = shardctrler.MakeClerk(ctrlers)
 	ck.make_end = make_end
 	// You'll have to add code here.
+	ck.clientId = int(nrand())
+	ck.seq = 1
+	ck.config = ck.sm.Query(-1)
+
 	return ck
 }
 
@@ -62,7 +71,9 @@ func MakeClerk(ctrlers []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 func (ck *Clerk) Get(key string) string {
 	args := GetArgs{}
 	args.Key = key
-
+	args.ClientId = ck.clientId
+	args.ClinetSeq = ck.seq
+	ck.seq++
 	for {
 		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
@@ -70,12 +81,42 @@ func (ck *Clerk) Get(key string) string {
 			// try each server for the shard.
 			for si := 0; si < len(servers); si++ {
 				srv := ck.make_end(servers[si])
-				var reply GetReply
-				ok := srv.Call("ShardKV.Get", &args, &reply)
-				if ok && (reply.Err == OK || reply.Err == ErrNoKey) {
-					return reply.Value
+				reply := GetReply{}
+				//处理Rpc超时
+				var ok bool
+				done := make(chan bool)
+				go func() {
+
+					ok = srv.Call("ShardKV.Get", &args, &reply)
+					done <- true
+				}()
+				select {
+				case <-done:
+				case <-time.After(2000 * time.Millisecond):
+					//打印超时和连接的服务器
+					//fmt.Println("time out" + strconv.Itoa(i))
+					ok = false
 				}
-				if ok && (reply.Err == ErrWrongGroup) {
+				if ok && reply.Err == OK {
+					//打印成功和id和seq
+					//fmt.Print("Get success")
+					//fmt.Println("id:", ck.clientId, "seq:", ck.seq, "value:", reply.Value)
+					return reply.Value
+				} else if ok && reply.Err == ErrWrongLeader {
+					//fmt.Print("id:", ck.clientId, "seq:", ck.seq, "value:", reply.Value)
+					//fmt.Println("get wrong leader")
+					continue
+				} else if ok && reply.Err == ErrNoKey {
+					return ""
+				} else if ok && reply.Err == ErrFail {
+					ck.seq++
+					args.ClinetSeq = ck.seq
+					continue
+				} else if ok && reply.Err == ErrTimeOut {
+					//fmt.Print("id:", ck.clientId, "seq:", ck.seq, "value:", reply.Value)
+					//fmt.Println("time out")
+					continue
+				} else if ok && (reply.Err == ErrWrongGroup) {
 					break
 				}
 				// ... not ok, or ErrWrongLeader
@@ -85,8 +126,6 @@ func (ck *Clerk) Get(key string) string {
 		// ask controller for the latest configuration.
 		ck.config = ck.sm.Query(-1)
 	}
-
-	return ""
 }
 
 // shared by Put and Append.
@@ -96,7 +135,9 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	args.Key = key
 	args.Value = value
 	args.Op = op
-
+	args.ClientId = ck.clientId
+	args.ClinetSeq = ck.seq
+	ck.seq++
 
 	for {
 		shard := key2shard(key)
@@ -105,11 +146,41 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 			for si := 0; si < len(servers); si++ {
 				srv := ck.make_end(servers[si])
 				var reply PutAppendReply
-				ok := srv.Call("ShardKV.PutAppend", &args, &reply)
-				if ok && reply.Err == OK {
-					return
+				ok := false
+				done := make(chan bool)
+				go func() {
+					if op == "Put" {
+						ok = srv.Call("ShardKV.Put", &args, &reply)
+					}
+					if op == "Append" {
+						ok = srv.Call("ShardKV.Append", &args, &reply)
+					}
+					done <- true
+				}()
+				select {
+				case <-done:
+				case <-time.After(2000 * time.Millisecond):
+
+					//fmt.Println("time out" + strconv.Itoa(i))
+					ok = false
 				}
-				if ok && reply.Err == ErrWrongGroup {
+				if ok && reply.Err == OK {
+					//打印成功和id和seq
+					//fmt.Print("PutAppend success")
+					// fmt.Println("id:", ck.clientId, "seq:", ck.seq)
+					return
+				} else if ok && reply.Err == ErrWrongLeader {
+					//fmt.Println("wrong leader")
+					continue
+				} else if ok && reply.Err == ErrFail {
+
+					args.ClinetSeq = ck.seq
+					ck.seq++
+					continue
+				} else if ok && reply.Err == ErrTimeOut {
+					//fmt.Println("time out")
+					continue
+				} else if ok && reply.Err == ErrWrongGroup {
 					break
 				}
 				// ... not ok, or ErrWrongLeader
