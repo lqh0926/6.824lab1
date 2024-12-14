@@ -2,7 +2,9 @@ package shardkv
 
 import (
 	"bytes"
+	"fmt"
 	"log"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -24,6 +26,9 @@ type Op struct {
 	ClinetSeq int
 	Shards    []int
 	Confignum int
+	Config    shardctrler.Config
+	Data      map[string]string
+	Seq       map[int]int
 }
 
 type ShardKV struct {
@@ -36,10 +41,11 @@ type ShardKV struct {
 	ctrlers      []*labrpc.ClientEnd
 	sm           *shardctrler.Clerk
 	maxraftstate int // snapshot if log grows this big
-
+	bepulling    map[int]*PullShardReply
 	// Your definitions here.
-	shards      map[int]string // shard -> state
-	confignum   int
+	shards      map[int][]int // shard -> [state and num]
+	preconfig   shardctrler.Config
+	nowconfig   shardctrler.Config
 	dead        int32
 	applied     int
 	kvMap       map[string]string
@@ -47,7 +53,38 @@ type ShardKV struct {
 	applyedmsgs map[int]int
 	replys      map[int]map[int]interface{}
 }
+type DebugMutex struct {
+	mu         sync.Mutex
+	lockedAt   string    // 记录上锁的位置
+	lockedTime time.Time // 记录上锁的时间
+}
 
+// Lock 获取锁并打印调试信息
+func (dm *DebugMutex) Lock() {
+	// 获取调用者的文件名和行号
+	_, file, line, _ := runtime.Caller(1)
+	lockLocation := fmt.Sprintf("%s:%d", file, line)
+
+	fmt.Printf("Attempting to lock at %s\n", lockLocation)
+	dm.mu.Lock()
+
+	dm.lockedAt = lockLocation
+	dm.lockedTime = time.Now()
+	fmt.Printf("Locked at %s\n", lockLocation)
+}
+
+// Unlock 释放锁并打印调试信息
+func (dm *DebugMutex) Unlock() {
+	// 获取调用者的文件名和行号
+	_, file, line, _ := runtime.Caller(1)
+	unlockLocation := fmt.Sprintf("%s:%d", file, line)
+
+	duration := time.Since(dm.lockedTime)
+	fmt.Printf("Unlocking at %s (locked at %s, held for %v)\n",
+		unlockLocation, dm.lockedAt, duration)
+
+	dm.mu.Unlock()
+}
 func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 	//fmt.Println("Get", args.Key)
 	kv.mu.Lock()
@@ -68,8 +105,8 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 	}
 	shard := key2shard(args.Key)
 	inshard := false
-	for _, s := range kv.shards {
-		if s == shard {
+	for k, v := range kv.shards {
+		if k == shard && v[0] == Serving {
 			inshard = true
 			break
 		}
@@ -150,8 +187,8 @@ func (kv *ShardKV) Put(args *PutAppendArgs, reply *PutAppendReply) {
 	}
 	shard := key2shard(args.Key)
 	inshard := false
-	for _, s := range kv.shards {
-		if s == shard {
+	for k, v := range kv.shards {
+		if k == shard && v[0] == Serving {
 			inshard = true
 			break
 		}
@@ -217,8 +254,8 @@ func (kv *ShardKV) Append(args *PutAppendArgs, reply *PutAppendReply) {
 	}
 	shard := key2shard(args.Key)
 	inshard := false
-	for _, s := range kv.shards {
-		if s == shard {
+	for k, v := range kv.shards {
+		if k == shard && v[0] == Serving {
 			inshard = true
 			break
 		}
@@ -267,18 +304,49 @@ func (kv *ShardKV) Append(args *PutAppendArgs, reply *PutAppendReply) {
 		reply.Err = reply2.Err
 	}
 }
-func (kv *ShardKV) Modifycfg(shard []int, num int) {
+func (kv *ShardKV) Modifycfg(shard []int, num int, config shardctrler.Config) {
+	op := Op{Opration: "Modifycfg", Shards: shard, Confignum: num, Config: config}
+	kv.rf.Start(op)
+	//kv.startedmsgs[logindex] = map[int]map[int]chan interface{}{args.ClientId: {args.ClinetSeq: repch}}
+
+}
+func (kv *ShardKV) syncNewShare(reply *PullShardReply, shard int) {
 	kv.mu.Lock()
-	op := Op{Opration: "Modifycfg", Shards: make(map[int]string), Confignum: num}
-	_, _, isLeader := kv.rf.Start(op)
-	repch := make(chan interface{})
-	if !isLeader {
+	if reply.Confignum == kv.nowconfig.Num {
+		op := Op{Opration: "Pull", Data: reply.Data, Seq: reply.Seq, Confignum: reply.Confignum, ClinetSeq: shard}
+		_, _, isLeader := kv.rf.Start(op)
+		if !isLeader {
+			kv.mu.Unlock()
+			return
+		}
+	}
+	kv.mu.Unlock()
+}
+func (kv *ShardKV) PullShard(args *PullShardArgs, reply *PullShardReply) {
+	kv.mu.Lock()
+	if kv.nowconfig.Num != args.ConfigNum {
+		reply.Err = ErrFail
 		kv.mu.Unlock()
 		return
 	}
+	if kv.shards[args.Shard][1] == args.ConfigNum && kv.shards[args.Shard][0] == BePulling {
+		reply.Err = OK
+		reply.Confignum = args.ConfigNum
+		reply.Data = make(map[string]string)
+		for k, v := range kv.kvMap {
+			temp := key2shard(k)
+			if temp == args.Shard {
+				reply.Data[k] = v
+			}
+		}
+		reply.Seq = make(map[int]int)
+		for k, v := range kv.applyedmsgs {
+			reply.Seq[k] = v
+		}
+	} else {
+		reply.Err = ErrFail
+	}
 	kv.mu.Unlock()
-	//kv.startedmsgs[logindex] = map[int]map[int]chan interface{}{args.ClientId: {args.ClinetSeq: repch}}
-
 }
 
 // the tester calls Kill() when a ShardKV instance won't
@@ -338,10 +406,13 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.applyedmsgs = make(map[int]int)
 	kv.replys = make(map[int]map[int]interface{})
 	kv.sm = shardctrler.MakeClerk(ctrlers)
-	kv.shards = make(map[int]string)
+	kv.shards = make(map[int][]int)
+	kv.bepulling = make(map[int]*PullShardReply)
 	go kv.Tickerconfig()
 	go kv.TickerSnapShot()
 	go kv.handleApplyCh()
+	go kv.TickerPullShard()
+	//go kv.PrintConfig()
 	return kv
 }
 
@@ -373,7 +444,7 @@ func (kv *ShardKV) handleApplyCh() {
 			clientseq := op.ClinetSeq
 
 			kv.mu.Lock()
-			if kv.applyedmsgs[clientid] >= clientseq {
+			if clientid != 0 && kv.applyedmsgs[clientid] >= clientseq {
 				kv.mu.Unlock()
 				continue
 			}
@@ -382,12 +453,24 @@ func (kv *ShardKV) handleApplyCh() {
 			switch op.Opration {
 			case "Get":
 				reply := &GetReply{}
-				if value, ok := kv.kvMap[op.Key]; ok {
-
-					reply.Err = OK
-					reply.Value = value
+				shard := key2shard(op.Key)
+				inshard := false
+				for k, v := range kv.shards {
+					if k == shard && v[0] == Serving {
+						inshard = true
+						break
+					}
+				}
+				if !inshard {
+					reply.Err = ErrWrongGroup
 				} else {
-					reply.Err = ErrNoKey
+					if value, ok := kv.kvMap[op.Key]; ok {
+
+						reply.Err = OK
+						reply.Value = value
+					} else {
+						reply.Err = ErrNoKey
+					}
 				}
 				if ch, ok := kv.startedmsgs[op.ClientId][op.ClinetSeq]; ok {
 
@@ -406,7 +489,19 @@ func (kv *ShardKV) handleApplyCh() {
 			case "Put":
 				kv.kvMap[op.Key] = op.Value
 				reply := &PutAppendReply{}
+				shard := key2shard(op.Key)
+				inshard := false
 				reply.Err = OK
+				for k, v := range kv.shards {
+					if k == shard && v[0] == Serving {
+						inshard = true
+						break
+					}
+				}
+				if !inshard {
+					reply.Err = ErrWrongGroup
+				}
+
 				if ch, ok := kv.startedmsgs[op.ClientId][op.ClinetSeq]; ok {
 
 					kv.mu.Unlock()
@@ -424,7 +519,18 @@ func (kv *ShardKV) handleApplyCh() {
 			case "Append":
 				kv.kvMap[op.Key] += op.Value
 				reply := &PutAppendReply{}
+				shard := key2shard(op.Key)
+				inshard := false
 				reply.Err = OK
+				for k, v := range kv.shards {
+					if k == shard && v[0] == Serving {
+						inshard = true
+						break
+					}
+				}
+				if !inshard {
+					reply.Err = ErrWrongGroup
+				}
 				if ch, ok := kv.startedmsgs[op.ClientId][op.ClinetSeq]; ok {
 					kv.mu.Unlock()
 
@@ -438,23 +544,62 @@ func (kv *ShardKV) handleApplyCh() {
 					}
 				}
 			case "Modifycfg":
-				if kv.confignum >= op.Confignum {
-					kv.mu.Unlock()
-					continue
-				}
-				temp := make(map[int]string)
-				for k, _ := range kv.shards {
-					temp[k] = BePulling
-				}
-				for _, v := range op.Shards {
-					if _, ok := kv.shards[v]; !ok {
-						kv.shards[v] = Pulling
-					} else {
-						temp[v] = Serving
+				if kv.nowconfig.Num+1 == op.Confignum && kv.nowconfig.Num == kv.preconfig.Num {
+					for _, shard := range op.Shards {
+						if _, ok := kv.shards[shard]; !ok {
+							if op.Confignum == 1 {
+								kv.shards[shard] = []int{Serving, op.Confignum}
+							} else {
+								kv.shards[shard] = []int{Pulling, op.Confignum}
+							}
+
+						} else {
+							if kv.shards[shard][0] == BePulling {
+								kv.shards[shard] = []int{Pulling, op.Confignum}
+							}
+						}
+					}
+					shardmap := make(map[int]struct{})
+					for _, shard := range op.Shards {
+						shardmap[shard] = struct{}{}
+					}
+					for shard := range kv.shards {
+						if _, ok := shardmap[shard]; !ok {
+							kv.shards[shard] = []int{BePulling, op.Confignum}
+							pullreply := &PullShardReply{}
+							pullreply.Confignum = op.Confignum
+							pullreply.Data = make(map[string]string)
+							for k, v := range kv.kvMap {
+								if key2shard(k) == shard {
+									pullreply.Data[k] = v
+								}
+							}
+							pullreply.Seq = make(map[int]int)
+							for k, v := range kv.applyedmsgs {
+								pullreply.Seq[k] = v
+							}
+							kv.bepulling[shard] = pullreply
+						}
+					}
+					kv.nowconfig = op.Config
+					if op.Confignum == 1 {
+						kv.preconfig = op.Config
 					}
 				}
-				kv.confignum = op.Confignum
-				kv.mu.Unlock()
+
+			case "Pull":
+				if kv.nowconfig.Num == op.Confignum && kv.nowconfig.Num != kv.preconfig.Num {
+					for k, v := range op.Data {
+						kv.kvMap[k] = v
+					}
+					for k, v := range op.Seq {
+						if kv.applyedmsgs[k] < v {
+							kv.applyedmsgs[k] = v
+						}
+					}
+					kv.shards[op.ClinetSeq] = []int{Serving, op.Confignum}
+
+				}
 
 			}
 
@@ -515,22 +660,104 @@ func (kv *ShardKV) Tickerconfig() {
 			time.Sleep(100 * time.Millisecond)
 			continue
 		}
-		config := kv.sm.Query(-1)
-		if config.Num != 0 {
-			gid := kv.gid
+		kv.mu.Unlock()
+		config := kv.sm.Query(kv.nowconfig.Num + 1)
+		kv.mu.Lock()
+		if config.Num == kv.nowconfig.Num {
+			kv.mu.Unlock()
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		if config.Num == kv.nowconfig.Num+1 && kv.nowconfig.Num == kv.preconfig.Num {
 			shards := make([]int, 0)
-			for i := 0; i < shardctrler.NShards; i++ {
-				if config.Shards[i] == gid {
+			for i, v := range config.Shards {
+				if v == kv.gid {
 					shards = append(shards, i)
 				}
 			}
-			if len(shards) != len(kv.shards) {
-				kv.mu.Unlock()
-				kv.Modifycfg(shards, config.Num)
-				kv.mu.Lock()
+			kv.Modifycfg(shards, config.Num, config)
+		}
+		kv.mu.Unlock()
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func (kv *ShardKV) TickerPullShard() {
+	for !kv.killed() {
+		_, isLeader := kv.rf.GetState()
+
+		if !isLeader {
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		wg := sync.WaitGroup{}
+		kv.mu.Lock()
+		shards := make(map[int][]int)
+		for k, v := range kv.shards {
+			shards[k] = v
+		}
+		kv.mu.Unlock()
+		for k, v := range shards {
+
+			if v[0] == Pulling {
+				wg.Add(1)
+				go kv.PullRpc(k, v[1], &wg)
+
 			}
 
 		}
+		//检测如果没有pull状态 让pre和now相等
+		kv.mu.Lock()
+		hasPulling := false
+		for _, v := range kv.shards {
+			if v[0] == Pulling {
+				hasPulling = true
+				break
+			}
+		}
+		if !hasPulling {
+			kv.preconfig = kv.nowconfig
+		}
+		kv.mu.Unlock()
+
+		wg.Wait()
 		time.Sleep(100 * time.Millisecond)
 	}
+}
+func (kv *ShardKV) PullRpc(shard int, configNum int, wg *sync.WaitGroup) {
+	args := &PullShardArgs{Shard: shard, ConfigNum: configNum}
+	reply := &PullShardReply{}
+	kv.mu.Lock()
+	servers := kv.preconfig.Groups[kv.preconfig.Shards[shard]]
+	kv.mu.Unlock()
+	servers_end := make([]*labrpc.ClientEnd, len(servers))
+	for i, v := range servers {
+		servers_end[i] = kv.make_end(v)
+	}
+	for i := 0; i < len(servers_end); i++ {
+		ok := servers_end[i].Call("ShardKV.PullShard", args, reply)
+		if ok && reply.Err == OK {
+			kv.syncNewShare(reply, shard)
+			break
+		} else if ok && reply.Err == ErrWrongLeader {
+			continue
+		} else if ok && reply.Err == ErrFail {
+			continue
+		} else if ok && reply.Err == ErrTimeOut {
+			continue
+		}
+	}
+	wg.Done()
+
+}
+
+func (kv *ShardKV) PrintConfig() {
+	for {
+		kv.mu.Lock()
+
+		fmt.Print("gid:", kv.gid, "me:", kv.me, "config:", kv.nowconfig)
+		time.Sleep(500 * time.Millisecond)
+		kv.mu.Unlock()
+	}
+
 }

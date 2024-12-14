@@ -10,6 +10,7 @@ package shardkv
 
 import (
 	"crypto/rand"
+	"fmt"
 	"math/big"
 	"time"
 
@@ -99,8 +100,8 @@ func (ck *Clerk) Get(key string) string {
 				}
 				if ok && reply.Err == OK {
 					//打印成功和id和seq
-					//fmt.Print("Get success")
-					//fmt.Println("id:", ck.clientId, "seq:", ck.seq, "value:", reply.Value)
+					fmt.Print("Get success")
+					fmt.Println("id:", ck.clientId, "seq:", ck.seq, "value:", reply.Value)
 					return reply.Value
 				} else if ok && reply.Err == ErrWrongLeader {
 					//fmt.Print("id:", ck.clientId, "seq:", ck.seq, "value:", reply.Value)
@@ -166,8 +167,8 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 				}
 				if ok && reply.Err == OK {
 					//打印成功和id和seq
-					//fmt.Print("PutAppend success")
-					// fmt.Println("id:", ck.clientId, "seq:", ck.seq)
+					fmt.Print("PutAppend success")
+					fmt.Println("id:", ck.clientId, "seq:", ck.seq)
 					return
 				} else if ok && reply.Err == ErrWrongLeader {
 					//fmt.Println("wrong leader")

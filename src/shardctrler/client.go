@@ -7,6 +7,7 @@ package shardctrler
 import (
 	"crypto/rand"
 	"math/big"
+	"sync"
 	"time"
 
 	"6.5840/labrpc"
@@ -17,6 +18,7 @@ type Clerk struct {
 	// Your data here.
 	clientId int
 	seq      int
+	mu       sync.Mutex
 }
 
 func nrand() int64 {
@@ -36,6 +38,8 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 }
 
 func (ck *Clerk) Query(num int) Config {
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
 	args := &QueryArgs{}
 	// Your code here.
 	args.Num = num
@@ -72,6 +76,8 @@ func (ck *Clerk) Query(num int) Config {
 }
 
 func (ck *Clerk) Join(servers map[int][]string) {
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
 	args := &JoinArgs{}
 	// Your code here.
 	args.Servers = servers
@@ -109,6 +115,8 @@ func (ck *Clerk) Join(servers map[int][]string) {
 }
 
 func (ck *Clerk) Leave(gids []int) {
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
 	args := &LeaveArgs{}
 	// Your code here.
 	args.GIDs = gids
@@ -147,6 +155,8 @@ func (ck *Clerk) Leave(gids []int) {
 }
 
 func (ck *Clerk) Move(shard int, gid int) {
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
 	args := &MoveArgs{}
 	// Your code here.
 	args.Shard = shard

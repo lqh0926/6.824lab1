@@ -17,9 +17,9 @@ const (
 	ErrTimeOut     = "ErrTimeOut"
 	ErrFail        = "ErrFail"
 	Errrepeated    = "Errrepeated"
-	Serving        = "Serving"   // 正常服务中
-	Pulling        = "Pulling"   // 正在从其他组拉取数据
-	BePulling      = "BePulling" // 正在被其他组拉取数据
+	Serving        = 0 // 正常服务中
+	Pulling        = 1 // 正在从其他组拉取数据
+	BePulling      = 2 // 正在被其他组拉取数据
 )
 
 type Err string
@@ -51,4 +51,15 @@ type GetArgs struct {
 type GetReply struct {
 	Err   Err
 	Value string
+}
+type PullShardArgs struct {
+	Shard     int
+	ConfigNum int
+}
+type PullShardReply struct {
+	Err       Err
+	Confignum int
+	Data      map[string]string // 数据
+	Seq       map[int]int       // 客户端的seq
+
 }
