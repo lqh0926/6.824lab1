@@ -103,19 +103,7 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 		kv.mu.Unlock()
 		return
 	}
-	shard := key2shard(args.Key)
-	inshard := false
-	for k, v := range kv.shards {
-		if k == shard && v[0] == Serving {
-			inshard = true
-			break
-		}
-	}
-	if !inshard {
-		reply.Err = ErrWrongGroup
-		kv.mu.Unlock()
-		return
-	}
+
 	kv.replys[args.ClientId] = make(map[int]interface{})
 	op := Op{Opration: "Get", Key: args.Key, ClientId: args.ClientId, ClinetSeq: args.ClinetSeq}
 	_, _, isLeader := kv.rf.Start(op)
@@ -185,19 +173,7 @@ func (kv *ShardKV) Put(args *PutAppendArgs, reply *PutAppendReply) {
 		kv.mu.Unlock()
 		return
 	}
-	shard := key2shard(args.Key)
-	inshard := false
-	for k, v := range kv.shards {
-		if k == shard && v[0] == Serving {
-			inshard = true
-			break
-		}
-	}
-	if !inshard {
-		reply.Err = ErrWrongGroup
-		kv.mu.Unlock()
-		return
-	}
+
 	kv.replys[args.ClientId] = make(map[int]interface{})
 	op := Op{Opration: "Put", Key: args.Key, Value: args.Value, ClientId: args.ClientId, ClinetSeq: args.ClinetSeq}
 	_, _, isLeader := kv.rf.Start(op)
@@ -249,19 +225,6 @@ func (kv *ShardKV) Append(args *PutAppendArgs, reply *PutAppendReply) {
 			kv.mu.Unlock()
 			return
 		}
-		kv.mu.Unlock()
-		return
-	}
-	shard := key2shard(args.Key)
-	inshard := false
-	for k, v := range kv.shards {
-		if k == shard && v[0] == Serving {
-			inshard = true
-			break
-		}
-	}
-	if !inshard {
-		reply.Err = ErrWrongGroup
 		kv.mu.Unlock()
 		return
 	}
@@ -324,24 +287,14 @@ func (kv *ShardKV) syncNewShare(reply *PullShardReply, shard int) {
 }
 func (kv *ShardKV) PullShard(args *PullShardArgs, reply *PullShardReply) {
 	kv.mu.Lock()
-	if kv.nowconfig.Num != args.ConfigNum {
-		reply.Err = ErrFail
-		kv.mu.Unlock()
-		return
-	}
-	if kv.shards[args.Shard][1] == args.ConfigNum && kv.shards[args.Shard][0] == BePulling {
-		reply.Err = OK
-		reply.Confignum = args.ConfigNum
-		reply.Data = make(map[string]string)
-		for k, v := range kv.kvMap {
-			temp := key2shard(k)
-			if temp == args.Shard {
-				reply.Data[k] = v
-			}
-		}
-		reply.Seq = make(map[int]int)
-		for k, v := range kv.applyedmsgs {
-			reply.Seq[k] = v
+	if rep, ok := kv.bepulling[args.Shard]; ok {
+		if rep.Confignum == args.ConfigNum {
+			reply.Err = OK
+			reply.Confignum = rep.Confignum
+			reply.Data = rep.Data
+			reply.Seq = rep.Seq
+		} else {
+			reply.Err = ErrFail
 		}
 	} else {
 		reply.Err = ErrFail
@@ -487,11 +440,9 @@ func (kv *ShardKV) handleApplyCh() {
 				}
 
 			case "Put":
-				kv.kvMap[op.Key] = op.Value
 				reply := &PutAppendReply{}
 				shard := key2shard(op.Key)
 				inshard := false
-				reply.Err = OK
 				for k, v := range kv.shards {
 					if k == shard && v[0] == Serving {
 						inshard = true
@@ -500,6 +451,9 @@ func (kv *ShardKV) handleApplyCh() {
 				}
 				if !inshard {
 					reply.Err = ErrWrongGroup
+				} else {
+					kv.kvMap[op.Key] = op.Value
+					reply.Err = OK
 				}
 
 				if ch, ok := kv.startedmsgs[op.ClientId][op.ClinetSeq]; ok {
@@ -517,11 +471,10 @@ func (kv *ShardKV) handleApplyCh() {
 				}
 
 			case "Append":
-				kv.kvMap[op.Key] += op.Value
 				reply := &PutAppendReply{}
 				shard := key2shard(op.Key)
 				inshard := false
-				reply.Err = OK
+
 				for k, v := range kv.shards {
 					if k == shard && v[0] == Serving {
 						inshard = true
@@ -530,7 +483,11 @@ func (kv *ShardKV) handleApplyCh() {
 				}
 				if !inshard {
 					reply.Err = ErrWrongGroup
+				} else {
+					kv.kvMap[op.Key] += op.Value
+					reply.Err = OK
 				}
+
 				if ch, ok := kv.startedmsgs[op.ClientId][op.ClinetSeq]; ok {
 					kv.mu.Unlock()
 
@@ -565,20 +522,27 @@ func (kv *ShardKV) handleApplyCh() {
 					}
 					for shard := range kv.shards {
 						if _, ok := shardmap[shard]; !ok {
-							kv.shards[shard] = []int{BePulling, op.Confignum}
-							pullreply := &PullShardReply{}
-							pullreply.Confignum = op.Confignum
-							pullreply.Data = make(map[string]string)
-							for k, v := range kv.kvMap {
-								if key2shard(k) == shard {
-									pullreply.Data[k] = v
+							if kv.shards[shard][0] == Serving {
+								kv.shards[shard] = []int{BePulling, op.Confignum}
+								pullreply := &PullShardReply{}
+								pullreply.Confignum = op.Confignum
+								pullreply.Data = make(map[string]string)
+								for k, v := range kv.kvMap {
+									if key2shard(k) == shard {
+										pullreply.Data[k] = v
+									}
 								}
+								pullreply.Seq = make(map[int]int)
+								for k, v := range kv.applyedmsgs {
+									pullreply.Seq[k] = v
+								}
+								kv.bepulling[shard] = pullreply
 							}
-							pullreply.Seq = make(map[int]int)
-							for k, v := range kv.applyedmsgs {
-								pullreply.Seq[k] = v
+							for kv.shards[shard][0] == Pulling {
+								kv.mu.Unlock()
+								time.Sleep(100 * time.Millisecond)
+								kv.mu.Lock()
 							}
-							kv.bepulling[shard] = pullreply
 						}
 					}
 					kv.nowconfig = op.Config
@@ -611,12 +575,16 @@ func (kv *ShardKV) handleApplyCh() {
 type Snapshot struct {
 	KvMap       map[string]string
 	Applyedmsgs map[int]int
+	Shard       map[int][]int
+	Preconfig   shardctrler.Config
+	Nowconfig   shardctrler.Config
+	Bepulling   map[int]*PullShardReply
 }
 
 func (kv *ShardKV) GetSnapshot() []byte {
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
-	snp := Snapshot{KvMap: kv.kvMap, Applyedmsgs: kv.applyedmsgs}
+	snp := Snapshot{KvMap: kv.kvMap, Applyedmsgs: kv.applyedmsgs, Shard: kv.shards, Preconfig: kv.preconfig, Nowconfig: kv.nowconfig, Bepulling: kv.bepulling}
 	if err := e.Encode(snp); err != nil {
 		log.Fatalf("encode snapshot error: %v", err)
 	}
@@ -632,6 +600,10 @@ func (kv *ShardKV) ReadSnapshot(data []byte) {
 	}
 	kv.kvMap = snp.KvMap
 	kv.applyedmsgs = snp.Applyedmsgs
+	kv.shards = snp.Shard
+	kv.preconfig = snp.Preconfig
+	kv.nowconfig = snp.Nowconfig
+	kv.bepulling = snp.Bepulling
 
 	// if d.Decode(&kv.kvMap) != nil || d.Decode(&kv.applyedmsgs) != nil || d.Decode(&kv.replys) != nil || d.Decode(&kv.startedmsgs) != nil {
 	// 	log.Fatal("read snapshot error")
@@ -675,6 +647,7 @@ func (kv *ShardKV) Tickerconfig() {
 					shards = append(shards, i)
 				}
 			}
+			fmt.Println("cftmogid:", kv.gid, "me:", kv.me, "config:", kv.nowconfig, "shards:", shards)
 			kv.Modifycfg(shards, config.Num, config)
 		}
 		kv.mu.Unlock()
@@ -684,6 +657,19 @@ func (kv *ShardKV) Tickerconfig() {
 
 func (kv *ShardKV) TickerPullShard() {
 	for !kv.killed() {
+		//检测如果没有pull状态 让pre和now相等
+		kv.mu.Lock()
+		hasPulling := false
+		for _, v := range kv.shards {
+			if v[0] == Pulling {
+				hasPulling = true
+				break
+			}
+		}
+		if !hasPulling {
+			kv.preconfig = kv.nowconfig
+		}
+		kv.mu.Unlock()
 		_, isLeader := kv.rf.GetState()
 
 		if !isLeader {
@@ -706,19 +692,6 @@ func (kv *ShardKV) TickerPullShard() {
 			}
 
 		}
-		//检测如果没有pull状态 让pre和now相等
-		kv.mu.Lock()
-		hasPulling := false
-		for _, v := range kv.shards {
-			if v[0] == Pulling {
-				hasPulling = true
-				break
-			}
-		}
-		if !hasPulling {
-			kv.preconfig = kv.nowconfig
-		}
-		kv.mu.Unlock()
 
 		wg.Wait()
 		time.Sleep(100 * time.Millisecond)
@@ -756,8 +729,9 @@ func (kv *ShardKV) PrintConfig() {
 		kv.mu.Lock()
 
 		fmt.Print("gid:", kv.gid, "me:", kv.me, "config:", kv.nowconfig)
-		time.Sleep(500 * time.Millisecond)
+
 		kv.mu.Unlock()
+		time.Sleep(1000 * time.Millisecond)
 	}
 
 }
