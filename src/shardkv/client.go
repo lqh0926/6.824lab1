@@ -100,8 +100,8 @@ func (ck *Clerk) Get(key string) string {
 				}
 				if ok && reply.Err == OK {
 					//打印成功和id和seq
-					//fmt.Print("Get success")
-					//fmt.Println("id:", ck.clientId, "seq:", ck.seq, "value:", reply.Value, "key:", key)
+					fmt.Print("Get success")
+					fmt.Println("id:", ck.clientId, "seq:", args.ClinetSeq, "value:", reply.Value, "key:", key)
 					return reply.Value
 				} else if ok && reply.Err == ErrWrongLeader {
 					//fmt.Print("id:", ck.clientId, "seq:", ck.seq, "value:", reply.Value)
@@ -111,8 +111,8 @@ func (ck *Clerk) Get(key string) string {
 					return ""
 				} else if ok && reply.Err == ErrFail {
 
-					args.ClinetSeq = ck.seq
-					ck.seq++
+					// args.ClinetSeq = ck.seq
+					// ck.seq++
 					continue
 				} else if ok && reply.Err == ErrTimeOut {
 					//fmt.Print("id:", ck.clientId, "seq:", ck.seq, "value:", reply.Value)
@@ -121,8 +121,8 @@ func (ck *Clerk) Get(key string) string {
 				} else if ok && (reply.Err == ErrWrongGroup) {
 					fmt.Println("wrong group", "seq:", ck.seq, "id:", ck.clientId)
 
-					args.ClinetSeq = ck.seq
-					ck.seq++
+					// args.ClinetSeq = ck.seq
+					// ck.seq++
 					break
 				}
 				// ... not ok, or ErrWrongLeader
@@ -173,23 +173,23 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 				}
 				if ok && reply.Err == OK {
 					//打印成功和id和seq
-					//fmt.Print("PutAppend success")
-					//fmt.Println("id:", ck.clientId, "seq:", ck.seq, "value:", value, "key:", key)
+					fmt.Print("PutAppend success")
+					fmt.Println("id:", ck.clientId, "seq:", args.ClinetSeq, "value:", value, "key:", key)
 					return
 				} else if ok && reply.Err == ErrWrongLeader {
 					//fmt.Println("wrong leader")
 					continue
 				} else if ok && reply.Err == ErrFail {
 
-					args.ClinetSeq = ck.seq
-					ck.seq++
+					// args.ClinetSeq = ck.seq
+					// ck.seq++
 					continue
 				} else if ok && reply.Err == ErrTimeOut {
 					//fmt.Println("time out")
 					continue
 				} else if ok && reply.Err == ErrWrongGroup {
-					args.ClinetSeq = ck.seq
-					ck.seq++
+					// args.ClinetSeq = ck.seq
+					// ck.seq++
 					break
 				}
 				// ... not ok, or ErrWrongLeader

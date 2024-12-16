@@ -29,6 +29,7 @@ type Op struct {
 	Config    shardctrler.Config
 	Data      map[string]string
 	Seq       map[int]int
+	Replys    map[int]map[int]interface{}
 }
 
 type ShardKV struct {
@@ -276,7 +277,7 @@ func (kv *ShardKV) Modifycfg(shard []int, num int, config shardctrler.Config) {
 func (kv *ShardKV) syncNewShare(reply *PullShardReply, shard int) {
 	kv.mu.Lock()
 	if reply.Confignum == kv.nowconfig.Num {
-		op := Op{Opration: "Pull", Data: reply.Data, Seq: reply.Seq, Confignum: reply.Confignum, ClinetSeq: shard}
+		op := Op{Opration: "Pull", Data: reply.Data, Seq: reply.Seq, Confignum: reply.Confignum, ClinetSeq: shard, Replys: reply.Replys}
 		_, _, isLeader := kv.rf.Start(op)
 		if !isLeader {
 			kv.mu.Unlock()
@@ -293,6 +294,7 @@ func (kv *ShardKV) PullShard(args *PullShardArgs, reply *PullShardReply) {
 			reply.Confignum = rep.Confignum
 			reply.Data = rep.Data
 			reply.Seq = rep.Seq
+			reply.Replys = rep.Replys
 		} else {
 			reply.Err = ErrFail
 		}
@@ -341,7 +343,10 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	labgob.Register(GetArgs{})
 	labgob.Register(GetReply{})
 	labgob.Register(PutAppendArgs{})
-	labgob.Register(PutAppendReply{})
+	labgob.Register(&PutAppendReply{})
+	labgob.Register(&PullShardArgs{})
+	labgob.Register(&PullShardReply{})
+
 	kv := new(ShardKV)
 	kv.me = me
 	kv.maxraftstate = maxraftstate
@@ -401,8 +406,7 @@ func (kv *ShardKV) handleApplyCh() {
 				kv.mu.Unlock()
 				continue
 			}
-			kv.applied = msg.CommandIndex
-			kv.applyedmsgs[clientid] = clientseq
+
 			switch op.Opration {
 			case "Get":
 				reply := &GetReply{}
@@ -424,6 +428,8 @@ func (kv *ShardKV) handleApplyCh() {
 					} else {
 						reply.Err = ErrNoKey
 					}
+					kv.applied = msg.CommandIndex
+					kv.applyedmsgs[clientid] = clientseq
 				}
 				if ch, ok := kv.startedmsgs[op.ClientId][op.ClinetSeq]; ok {
 
@@ -431,7 +437,7 @@ func (kv *ShardKV) handleApplyCh() {
 
 					ch <- reply
 					continue
-				} else {
+				} else if reply.Err != ErrWrongGroup {
 					if _, ok := kv.replys[op.ClientId]; ok {
 						kv.replys[op.ClientId][op.ClinetSeq] = reply
 					} else {
@@ -454,6 +460,8 @@ func (kv *ShardKV) handleApplyCh() {
 				} else {
 					kv.kvMap[op.Key] = op.Value
 					reply.Err = OK
+					kv.applied = msg.CommandIndex
+					kv.applyedmsgs[clientid] = clientseq
 				}
 
 				if ch, ok := kv.startedmsgs[op.ClientId][op.ClinetSeq]; ok {
@@ -462,7 +470,7 @@ func (kv *ShardKV) handleApplyCh() {
 
 					ch <- reply
 					continue
-				} else {
+				} else if reply.Err != ErrWrongGroup {
 					if _, ok := kv.replys[op.ClientId]; ok {
 						kv.replys[op.ClientId][op.ClinetSeq] = reply
 					} else {
@@ -486,6 +494,9 @@ func (kv *ShardKV) handleApplyCh() {
 				} else {
 					kv.kvMap[op.Key] += op.Value
 					reply.Err = OK
+					//fmt.Println("op:", op, "me:", kv.me)
+					kv.applied = msg.CommandIndex
+					kv.applyedmsgs[clientid] = clientseq
 				}
 
 				if ch, ok := kv.startedmsgs[op.ClientId][op.ClinetSeq]; ok {
@@ -493,7 +504,7 @@ func (kv *ShardKV) handleApplyCh() {
 
 					ch <- reply
 					continue
-				} else {
+				} else if reply.Err != ErrWrongGroup {
 					if _, ok := kv.replys[op.ClientId]; ok {
 						kv.replys[op.ClientId][op.ClinetSeq] = reply
 					} else {
@@ -522,6 +533,13 @@ func (kv *ShardKV) handleApplyCh() {
 					}
 					for shard := range kv.shards {
 						if _, ok := shardmap[shard]; !ok {
+
+							for kv.shards[shard][0] == Pulling {
+								kv.mu.Unlock()
+								time.Sleep(100 * time.Millisecond)
+								kv.mu.Lock()
+
+							}
 							if kv.shards[shard][0] == Serving {
 								kv.shards[shard] = []int{BePulling, op.Confignum}
 								pullreply := &PullShardReply{}
@@ -530,18 +548,18 @@ func (kv *ShardKV) handleApplyCh() {
 								for k, v := range kv.kvMap {
 									if key2shard(k) == shard {
 										pullreply.Data[k] = v
+										fmt.Println("savapull:", k, v, kv.gid)
 									}
 								}
 								pullreply.Seq = make(map[int]int)
 								for k, v := range kv.applyedmsgs {
 									pullreply.Seq[k] = v
 								}
+								pullreply.Replys = make(map[int]map[int]interface{})
+								for k, v := range kv.replys {
+									pullreply.Replys[k] = v
+								}
 								kv.bepulling[shard] = pullreply
-							}
-							for kv.shards[shard][0] == Pulling {
-								kv.mu.Unlock()
-								time.Sleep(100 * time.Millisecond)
-								kv.mu.Lock()
 							}
 						}
 					}
@@ -553,16 +571,26 @@ func (kv *ShardKV) handleApplyCh() {
 
 			case "Pull":
 				if kv.nowconfig.Num == op.Confignum && kv.nowconfig.Num != kv.preconfig.Num {
-					for k, v := range op.Data {
-						kv.kvMap[k] = v
-					}
-					for k, v := range op.Seq {
-						if kv.applyedmsgs[k] < v {
-							kv.applyedmsgs[k] = v
+					if kv.shards[op.ClinetSeq][0] == Pulling {
+						for k, v := range op.Data {
+							kv.kvMap[k] = v
 						}
-					}
-					kv.shards[op.ClinetSeq] = []int{Serving, op.Confignum}
+						for k, v := range op.Seq {
+							if kv.applyedmsgs[k] < v {
+								kv.applyedmsgs[k] = v
+							}
+						}
+						for k, v := range op.Replys {
+							for k1, v1 := range v {
+								if _, ok := kv.replys[k]; !ok {
+									kv.replys[k] = make(map[int]interface{})
+								}
+								kv.replys[k][k1] = v1
+							}
+						}
+						kv.shards[op.ClinetSeq] = []int{Serving, op.Confignum}
 
+					}
 				}
 
 			}

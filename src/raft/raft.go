@@ -120,18 +120,24 @@ type Raft struct {
 // 	server int
 // }
 
-// func makeTicker(d time.Duration, s int) *myticker {
-// 	return &myticker{time.NewTicker(d), s}
-// }
-// func (t *myticker) C() <-chan time.Time {
-// 	fmt.Println("server ", t.server, " ticker")
-// 	return t.ticker.C
-// }
-// func (t *myticker) Reset(d time.Duration) {
-// 	fmt.Println("server ", t.server, " reset")
-// 	t.ticker.Reset(d)
-// }
-
+//	func makeTicker(d time.Duration, s int) *myticker {
+//		return &myticker{time.NewTicker(d), s}
+//	}
+//
+//	func (t *myticker) C() <-chan time.Time {
+//		fmt.Println("server ", t.server, " ticker")
+//		return t.ticker.C
+//	}
+//
+//	func (t *myticker) Reset(d time.Duration) {
+//		fmt.Println("server ", t.server, " reset")
+//		t.ticker.Reset(d)
+//	}
+func (rf *Raft) GetReplyfinish() bool {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return rf.committedIndex == rf.applyIndex
+}
 func (rf *Raft) runElectionTimer() {
 	rf.mu.Lock()
 

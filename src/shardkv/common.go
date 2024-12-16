@@ -61,5 +61,5 @@ type PullShardReply struct {
 	Confignum int
 	Data      map[string]string // 数据
 	Seq       map[int]int       // 客户端的seq
-
+	Replys    map[int]map[int]interface{}
 }
