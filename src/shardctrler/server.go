@@ -107,7 +107,7 @@ func (sc *ShardCtrler) Join(args *JoinArgs, reply *JoinReply) {
 	sc.replys[args.ClientId] = make(map[int]interface{})
 	op := Op{OprType: "Join", Args: args, ClientId: args.ClientId, ClinetSeq: args.ClientSeq}
 	_, _, isLeader := sc.rf.Start(op)
-	repch := make(chan interface{})
+	repch := make(chan interface{}, 1)
 
 	if !isLeader {
 		//fmt.Println("not leader")
@@ -167,7 +167,7 @@ func (sc *ShardCtrler) Leave(args *LeaveArgs, reply *LeaveReply) {
 	sc.replys[args.ClientId] = make(map[int]interface{})
 	op := Op{OprType: "Leave", Args: args, ClientId: args.ClientId, ClinetSeq: args.ClientSeq}
 	_, _, isLeader := sc.rf.Start(op)
-	repch := make(chan interface{})
+	repch := make(chan interface{}, 1)
 
 	if !isLeader {
 		//fmt.Println("not leader")
@@ -227,7 +227,7 @@ func (sc *ShardCtrler) Move(args *MoveArgs, reply *MoveReply) {
 	sc.replys[args.ClientId] = make(map[int]interface{})
 	op := Op{OprType: "Move", Args: args, ClientId: args.ClientId, ClinetSeq: args.ClientSeq}
 	_, _, isLeader := sc.rf.Start(op)
-	repch := make(chan interface{})
+	repch := make(chan interface{}, 1)
 
 	if !isLeader {
 		//fmt.Println("not leader")
@@ -287,7 +287,7 @@ func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
 	sc.replys[args.ClientId] = make(map[int]interface{})
 	op := Op{OprType: "Query", Args: args, ClientId: args.ClientId, ClinetSeq: args.ClientSeq}
 	_, _, isLeader := sc.rf.Start(op)
-	repch := make(chan interface{})
+	repch := make(chan interface{}, 1)
 
 	if !isLeader {
 		//fmt.Println("not leader")
@@ -396,8 +396,9 @@ func (sc *ShardCtrler) ApplyMsg() {
 				reply := sc.JoinApply(args)
 
 				if ch, ok := sc.startedmsgs[op.ClientId][op.ClinetSeq]; ok {
-					sc.mu.Unlock()
+
 					ch <- reply
+					sc.mu.Unlock()
 					continue
 				} else {
 					if _, ok := sc.replys[op.ClientId]; !ok {
@@ -418,8 +419,9 @@ func (sc *ShardCtrler) ApplyMsg() {
 				sc.applyedmsgs[op.ClientId] = op.ClinetSeq
 				reply := sc.LeaveApply(args)
 				if ch, ok := sc.startedmsgs[op.ClientId][op.ClinetSeq]; ok {
-					sc.mu.Unlock()
+
 					ch <- reply
+					sc.mu.Unlock()
 					continue
 				} else {
 					if _, ok := sc.replys[op.ClientId]; !ok {
@@ -437,8 +439,9 @@ func (sc *ShardCtrler) ApplyMsg() {
 				sc.applyedmsgs[op.ClientId] = op.ClinetSeq
 				reply := sc.MoveApply(args)
 				if ch, ok := sc.startedmsgs[op.ClientId][op.ClinetSeq]; ok {
-					sc.mu.Unlock()
+
 					ch <- reply
+					sc.mu.Unlock()
 					continue
 				} else {
 					if _, ok := sc.replys[op.ClientId]; !ok {
@@ -456,8 +459,9 @@ func (sc *ShardCtrler) ApplyMsg() {
 				sc.applyedmsgs[op.ClientId] = op.ClinetSeq
 				reply := sc.QueryApply(args)
 				if ch, ok := sc.startedmsgs[op.ClientId][op.ClinetSeq]; ok {
-					sc.mu.Unlock()
+
 					ch <- reply
+					sc.mu.Unlock()
 					continue
 				} else {
 					if _, ok := sc.replys[op.ClientId]; !ok {

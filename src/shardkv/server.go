@@ -108,7 +108,7 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 	kv.replys[args.ClientId] = make(map[int]interface{})
 	op := Op{Opration: "Get", Key: args.Key, ClientId: args.ClientId, ClinetSeq: args.ClinetSeq}
 	_, _, isLeader := kv.rf.Start(op)
-	repch := make(chan interface{})
+	repch := make(chan interface{}, 1)
 
 	if !isLeader {
 		//fmt.Println("not leader")
@@ -143,18 +143,8 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 			return
 		}
 		reply2 := reply1.(*GetReply)
-		if reply2.Err == OK {
-			kv.mu.Lock()
-			if value, ok := kv.kvMap[args.Key]; ok {
-				reply.Err = OK
-				reply.Value = value
-			} else {
-				reply.Err = ErrNoKey
-			}
-			kv.mu.Unlock()
-		} else {
-			reply.Err = reply2.Err
-		}
+		reply.Value = reply2.Value
+		reply.Err = reply2.Err
 
 	}
 }
@@ -178,7 +168,7 @@ func (kv *ShardKV) Put(args *PutAppendArgs, reply *PutAppendReply) {
 	kv.replys[args.ClientId] = make(map[int]interface{})
 	op := Op{Opration: "Put", Key: args.Key, Value: args.Value, ClientId: args.ClientId, ClinetSeq: args.ClinetSeq}
 	_, _, isLeader := kv.rf.Start(op)
-	repch := make(chan interface{})
+	repch := make(chan interface{}, 1)
 	if !isLeader {
 		//fmt.Println("not leader")
 		reply.Err = ErrWrongLeader
@@ -232,7 +222,7 @@ func (kv *ShardKV) Append(args *PutAppendArgs, reply *PutAppendReply) {
 	kv.replys[args.ClientId] = make(map[int]interface{})
 	op := Op{Opration: "Append", Key: args.Key, Value: args.Value, ClientId: args.ClientId, ClinetSeq: args.ClinetSeq}
 	_, _, isLeader := kv.rf.Start(op)
-	repch := make(chan interface{})
+	repch := make(chan interface{}, 1)
 	if !isLeader {
 		reply.Err = ErrWrongLeader
 		kv.mu.Unlock()
@@ -341,7 +331,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	// Go's RPC library to marshall/unmarshall.
 	labgob.Register(Op{})
 	labgob.Register(GetArgs{})
-	labgob.Register(GetReply{})
+	labgob.Register(&GetReply{})
 	labgob.Register(PutAppendArgs{})
 	labgob.Register(&PutAppendReply{})
 	labgob.Register(&PullShardArgs{})
@@ -370,6 +360,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	go kv.TickerSnapShot()
 	go kv.handleApplyCh()
 	go kv.TickerPullShard()
+	//go kv.CleanReplys()
 	//go kv.PrintConfig()
 	return kv
 }
@@ -430,6 +421,12 @@ func (kv *ShardKV) handleApplyCh() {
 					}
 					kv.applied = msg.CommandIndex
 					kv.applyedmsgs[clientid] = clientseq
+					//fmt.Println("get:", op.Key, reply.Value, kv.gid, kv.shards[shard])
+					if _, ok := kv.replys[op.ClientId]; ok {
+						kv.replys[op.ClientId][op.ClinetSeq] = reply
+					} else {
+						kv.replys[op.ClientId] = map[int]interface{}{op.ClinetSeq: reply}
+					}
 				}
 				if ch, ok := kv.startedmsgs[op.ClientId][op.ClinetSeq]; ok {
 
@@ -437,12 +434,6 @@ func (kv *ShardKV) handleApplyCh() {
 
 					ch <- reply
 					continue
-				} else if reply.Err != ErrWrongGroup {
-					if _, ok := kv.replys[op.ClientId]; ok {
-						kv.replys[op.ClientId][op.ClinetSeq] = reply
-					} else {
-						kv.replys[op.ClientId] = map[int]interface{}{op.ClinetSeq: reply}
-					}
 				}
 
 			case "Put":
@@ -462,6 +453,11 @@ func (kv *ShardKV) handleApplyCh() {
 					reply.Err = OK
 					kv.applied = msg.CommandIndex
 					kv.applyedmsgs[clientid] = clientseq
+					if _, ok := kv.replys[op.ClientId]; ok {
+						kv.replys[op.ClientId][op.ClinetSeq] = reply
+					} else {
+						kv.replys[op.ClientId] = map[int]interface{}{op.ClinetSeq: reply}
+					}
 				}
 
 				if ch, ok := kv.startedmsgs[op.ClientId][op.ClinetSeq]; ok {
@@ -470,12 +466,6 @@ func (kv *ShardKV) handleApplyCh() {
 
 					ch <- reply
 					continue
-				} else if reply.Err != ErrWrongGroup {
-					if _, ok := kv.replys[op.ClientId]; ok {
-						kv.replys[op.ClientId][op.ClinetSeq] = reply
-					} else {
-						kv.replys[op.ClientId] = map[int]interface{}{op.ClinetSeq: reply}
-					}
 				}
 
 			case "Append":
@@ -491,12 +481,24 @@ func (kv *ShardKV) handleApplyCh() {
 				}
 				if !inshard {
 					reply.Err = ErrWrongGroup
+					if _, ok := kv.shards[shard]; ok {
+						//fmt.Println(msg.CommandIndex, "wronggroup", kv.shards[shard], kv.gid, kv.me)
+					} else {
+						//fmt.Println(msg.CommandIndex, "wronggroup")
+					}
+
 				} else {
 					kv.kvMap[op.Key] += op.Value
 					reply.Err = OK
 					//fmt.Println("op:", op, "me:", kv.me)
+					//fmt.Println(kv.shards[shard], kv.gid, " append", op.Key, op.Value, kv.me, msg.CommandIndex)
 					kv.applied = msg.CommandIndex
 					kv.applyedmsgs[clientid] = clientseq
+					if _, ok := kv.replys[op.ClientId]; ok {
+						kv.replys[op.ClientId][op.ClinetSeq] = reply
+					} else {
+						kv.replys[op.ClientId] = map[int]interface{}{op.ClinetSeq: reply}
+					}
 				}
 
 				if ch, ok := kv.startedmsgs[op.ClientId][op.ClinetSeq]; ok {
@@ -504,14 +506,9 @@ func (kv *ShardKV) handleApplyCh() {
 
 					ch <- reply
 					continue
-				} else if reply.Err != ErrWrongGroup {
-					if _, ok := kv.replys[op.ClientId]; ok {
-						kv.replys[op.ClientId][op.ClinetSeq] = reply
-					} else {
-						kv.replys[op.ClientId] = map[int]interface{}{op.ClinetSeq: reply}
-					}
 				}
 			case "Modifycfg":
+				kv.applied = msg.CommandIndex
 				if kv.nowconfig.Num+1 == op.Confignum && kv.nowconfig.Num == kv.preconfig.Num {
 					for _, shard := range op.Shards {
 						if _, ok := kv.shards[shard]; !ok {
@@ -533,13 +530,6 @@ func (kv *ShardKV) handleApplyCh() {
 					}
 					for shard := range kv.shards {
 						if _, ok := shardmap[shard]; !ok {
-
-							for kv.shards[shard][0] == Pulling {
-								kv.mu.Unlock()
-								time.Sleep(100 * time.Millisecond)
-								kv.mu.Lock()
-
-							}
 							if kv.shards[shard][0] == Serving {
 								kv.shards[shard] = []int{BePulling, op.Confignum}
 								pullreply := &PullShardReply{}
@@ -548,7 +538,8 @@ func (kv *ShardKV) handleApplyCh() {
 								for k, v := range kv.kvMap {
 									if key2shard(k) == shard {
 										pullreply.Data[k] = v
-										fmt.Println("savapull:", k, v, kv.gid)
+										//fmt.Println("savapull:", k, v, kv.gid, kv.shards[shard], kv.me, msg.CommandIndex)
+										delete(kv.kvMap, k)
 									}
 								}
 								pullreply.Seq = make(map[int]int)
@@ -560,6 +551,7 @@ func (kv *ShardKV) handleApplyCh() {
 									pullreply.Replys[k] = v
 								}
 								kv.bepulling[shard] = pullreply
+								//
 							}
 						}
 					}
@@ -567,9 +559,20 @@ func (kv *ShardKV) handleApplyCh() {
 					if op.Confignum == 1 {
 						kv.preconfig = op.Config
 					}
+					hasPulling := false
+					for _, v := range kv.shards {
+						if v[0] == Pulling {
+							hasPulling = true
+							break
+						}
+					}
+					if !hasPulling {
+						kv.preconfig = kv.nowconfig
+					}
 				}
 
 			case "Pull":
+				kv.applied = msg.CommandIndex
 				if kv.nowconfig.Num == op.Confignum && kv.nowconfig.Num != kv.preconfig.Num {
 					if kv.shards[op.ClinetSeq][0] == Pulling {
 						for k, v := range op.Data {
@@ -589,7 +592,16 @@ func (kv *ShardKV) handleApplyCh() {
 							}
 						}
 						kv.shards[op.ClinetSeq] = []int{Serving, op.Confignum}
-
+						hasPulling := false
+						for _, v := range kv.shards {
+							if v[0] == Pulling {
+								hasPulling = true
+								break
+							}
+						}
+						if !hasPulling {
+							kv.preconfig = kv.nowconfig
+						}
 					}
 				}
 
@@ -604,6 +616,7 @@ type Snapshot struct {
 	KvMap       map[string]string
 	Applyedmsgs map[int]int
 	Shard       map[int][]int
+	Replys      map[int]map[int]interface{}
 	Preconfig   shardctrler.Config
 	Nowconfig   shardctrler.Config
 	Bepulling   map[int]*PullShardReply
@@ -612,7 +625,7 @@ type Snapshot struct {
 func (kv *ShardKV) GetSnapshot() []byte {
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
-	snp := Snapshot{KvMap: kv.kvMap, Applyedmsgs: kv.applyedmsgs, Shard: kv.shards, Preconfig: kv.preconfig, Nowconfig: kv.nowconfig, Bepulling: kv.bepulling}
+	snp := Snapshot{KvMap: kv.kvMap, Applyedmsgs: kv.applyedmsgs, Shard: kv.shards, Preconfig: kv.preconfig, Nowconfig: kv.nowconfig, Bepulling: kv.bepulling, Replys: kv.replys}
 	if err := e.Encode(snp); err != nil {
 		log.Fatalf("encode snapshot error: %v", err)
 	}
@@ -632,6 +645,7 @@ func (kv *ShardKV) ReadSnapshot(data []byte) {
 	kv.preconfig = snp.Preconfig
 	kv.nowconfig = snp.Nowconfig
 	kv.bepulling = snp.Bepulling
+	kv.replys = snp.Replys
 
 	// if d.Decode(&kv.kvMap) != nil || d.Decode(&kv.applyedmsgs) != nil || d.Decode(&kv.replys) != nil || d.Decode(&kv.startedmsgs) != nil {
 	// 	log.Fatal("read snapshot error")
@@ -675,7 +689,7 @@ func (kv *ShardKV) Tickerconfig() {
 					shards = append(shards, i)
 				}
 			}
-			fmt.Println("cftmogid:", kv.gid, "me:", kv.me, "config:", kv.nowconfig, "shards:", shards)
+			//fmt.Println("cftmogid:", kv.gid, "me:", kv.me, "config:", kv.nowconfig, "shards:", shards)
 			kv.Modifycfg(shards, config.Num, config)
 		}
 		kv.mu.Unlock()
@@ -686,25 +700,13 @@ func (kv *ShardKV) Tickerconfig() {
 func (kv *ShardKV) TickerPullShard() {
 	for !kv.killed() {
 		//检测如果没有pull状态 让pre和now相等
-		kv.mu.Lock()
-		hasPulling := false
-		for _, v := range kv.shards {
-			if v[0] == Pulling {
-				hasPulling = true
-				break
-			}
-		}
-		if !hasPulling {
-			kv.preconfig = kv.nowconfig
-		}
-		kv.mu.Unlock()
 		_, isLeader := kv.rf.GetState()
 
 		if !isLeader {
 			time.Sleep(100 * time.Millisecond)
 			continue
 		}
-		wg := sync.WaitGroup{}
+		//wg := sync.WaitGroup{}
 		kv.mu.Lock()
 		shards := make(map[int][]int)
 		for k, v := range kv.shards {
@@ -714,18 +716,17 @@ func (kv *ShardKV) TickerPullShard() {
 		for k, v := range shards {
 
 			if v[0] == Pulling {
-				wg.Add(1)
-				go kv.PullRpc(k, v[1], &wg)
+				//wg.Add(1)
+				go kv.PullRpc(k, v[1])
 
 			}
 
 		}
 
-		wg.Wait()
 		time.Sleep(100 * time.Millisecond)
 	}
 }
-func (kv *ShardKV) PullRpc(shard int, configNum int, wg *sync.WaitGroup) {
+func (kv *ShardKV) PullRpc(shard int, configNum int) {
 	args := &PullShardArgs{Shard: shard, ConfigNum: configNum}
 	reply := &PullShardReply{}
 	kv.mu.Lock()
@@ -748,7 +749,7 @@ func (kv *ShardKV) PullRpc(shard int, configNum int, wg *sync.WaitGroup) {
 			continue
 		}
 	}
-	wg.Done()
+	//wg.Done()
 
 }
 
@@ -762,4 +763,28 @@ func (kv *ShardKV) PrintConfig() {
 		time.Sleep(1000 * time.Millisecond)
 	}
 
+}
+
+// 定期清理replys，只留最新的
+func (kv *ShardKV) CleanReplys() {
+	for !kv.killed() {
+		kv.mu.Lock()
+		for _, v := range kv.replys {
+			//先找里面最大的
+			max := 0
+			for k1 := range v {
+				if k1 > max {
+					max = k1
+				}
+			}
+			//删除小的
+			for k1 := range v {
+				if k1 < max {
+					delete(v, k1)
+				}
+			}
+		}
+		kv.mu.Unlock()
+		time.Sleep(100 * time.Millisecond)
+	}
 }

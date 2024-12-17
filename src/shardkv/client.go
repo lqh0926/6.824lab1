@@ -10,7 +10,6 @@ package shardkv
 
 import (
 	"crypto/rand"
-	"fmt"
 	"math/big"
 	"time"
 
@@ -100,8 +99,8 @@ func (ck *Clerk) Get(key string) string {
 				}
 				if ok && reply.Err == OK {
 					//打印成功和id和seq
-					fmt.Print("Get success")
-					fmt.Println("id:", ck.clientId, "seq:", args.ClinetSeq, "value:", reply.Value, "key:", key)
+					//fmt.Print("Get success")
+					//fmt.Println("id:", ck.clientId, "seq:", args.ClinetSeq, "value:", reply.Value, "key:", key)
 					return reply.Value
 				} else if ok && reply.Err == ErrWrongLeader {
 					//fmt.Print("id:", ck.clientId, "seq:", ck.seq, "value:", reply.Value)
@@ -119,7 +118,7 @@ func (ck *Clerk) Get(key string) string {
 					//fmt.Println("time out")
 					continue
 				} else if ok && (reply.Err == ErrWrongGroup) {
-					fmt.Println("wrong group", "seq:", ck.seq, "id:", ck.clientId)
+					//fmt.Println("wrong group", "seq:", ck.seq, "id:", ck.clientId)
 
 					// args.ClinetSeq = ck.seq
 					// ck.seq++
@@ -173,8 +172,8 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 				}
 				if ok && reply.Err == OK {
 					//打印成功和id和seq
-					fmt.Print("PutAppend success")
-					fmt.Println("id:", ck.clientId, "seq:", args.ClinetSeq, "value:", value, "key:", key)
+					//fmt.Print("PutAppend success")
+					//fmt.Println("id:", ck.clientId, "seq:", args.ClinetSeq, "value:", value, "key:", key, "gid", gid)
 					return
 				} else if ok && reply.Err == ErrWrongLeader {
 					//fmt.Println("wrong leader")

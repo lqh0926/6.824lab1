@@ -153,7 +153,6 @@ func (ck *Clerk) Leave(gids []int) {
 		}
 	}
 }
-
 func (ck *Clerk) Move(shard int, gid int) {
 	ck.mu.Lock()
 	defer ck.mu.Unlock()

@@ -77,10 +77,12 @@ type QueryArgs struct {
 	Num       int // desired config number
 	ClientId  int
 	ClientSeq int
+	Gid       int
 }
 
 type QueryReply struct {
 	WrongLeader bool
 	Err         Err
 	Config      Config
+	Finishednum int
 }
